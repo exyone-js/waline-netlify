@@ -1,0 +1,3 @@
+# patch-package 的补丁必须在所有平台保持 LF，
+# 否则 CRLF 会导致 Linux 构建时 patch 上下文匹配失败
+patches/*.patch text eol=lf
