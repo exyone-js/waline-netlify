@@ -1,5 +1,5 @@
 diff --git a/node_modules/@waline/vercel/src/service/storage/github.js b/node_modules/@waline/vercel/src/service/storage/github.js
-index b60a12a..5b00107 100644
+index b60a12a..a2bf99e 100644
 --- a/node_modules/@waline/vercel/src/service/storage/github.js
 +++ b/node_modules/@waline/vercel/src/service/storage/github.js
 @@ -65,7 +65,27 @@ class Github {
@@ -30,4 +30,60 @@ index b60a12a..5b00107 100644
 +      })
        .catch((err) => {
          const isTooLarge = err.message.includes('"too_large"');
+ 
+@@ -114,19 +134,43 @@ class Github {
+   }
+ 
+   async set(filename, content, { sha }) {
+-    return fetch(`https://api.github.com/repos/${path.join(this.repo, 'contents', filename)}`, {
+-      method: 'PUT',
+-      headers: {
+-        accept: 'application/vnd.github.v3+json',
+-        authorization: `token ${this.token}`,
+-        'user-agent': 'Waline',
++    const body = {
++      message: 'feat(waline): update comment data',
++      content: Buffer.from(content, 'utf-8').toString('base64'),
++    };
++
++    // sha 仅在更新已存在文件时提供；创建新文件时必须省略，否则 GitHub 报错
++    if (sha) {
++      body.sha = sha;
++    }
++
++    const resp = await fetch(
++      `https://api.github.com/repos/${path.join(this.repo, 'contents', filename)}`,
++      {
++        method: 'PUT',
++        headers: {
++          accept: 'application/vnd.github.v3+json',
++          authorization: `token ${this.token}`,
++          'user-agent': 'Waline',
++        },
++        body: JSON.stringify(body),
+       },
+-      body: JSON.stringify({
+-        sha,
+-        message: 'feat(waline): update comment data',
+-        content: Buffer.from(content, 'utf-8').toString('base64'),
+-      }),
+-    });
++    );
++
++    const data = await resp.json().catch(() => ({}));
++
++    // 必须检查写入结果，否则 GitHub 返回 4xx/5xx 时会被静默吞掉，
++    // 表现为“提示评论成功但刷新后丢失”
++    if (!resp.ok) {
++      const error = new Error(
++        `GitHub write failed (${resp.status}): ${data.message || resp.statusText || 'unknown'}`,
++      );
++
++      error.statusCode = resp.status;
++      throw error;
++    }
++
++    return data;
+   }
+ }
  
