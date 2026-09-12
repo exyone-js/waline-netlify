@@ -1,0 +1,35 @@
+    const body = {
+      message: 'feat(waline): update comment data',
+      content: Buffer.from(content, 'utf-8').toString('base64'),
+    };
+
+    // 仅更新已存在文件时才可携带 sha；创建新文件携带会被 GitHub 拒绝
+    if (sha) {
+      body.sha = sha;
+    }
+
+    const resp = await fetch(
+      `https://api.github.com/repos/${path.join(this.repo, 'contents', filename)}`,
+      {
+        method: 'PUT',
+        headers: {
+          accept: 'application/vnd.github.v3+json',
+          authorization: `token ${this.token}`,
+          'user-agent': 'Waline',
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    const data = await resp.json().catch(() => ({}));
+
+    // 写入失败必须抛出，否则评论会“提示成功但刷新后丢失”
+    if (!resp.ok) {
+      const error = new Error(
+        `GitHub write failed (${resp.status}): ${data.message || resp.statusText || 'unknown'}`,
+      );
+
+      error.statusCode = resp.status;
+      throw error;
+    }
+
+    return data;

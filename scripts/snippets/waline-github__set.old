@@ -1,0 +1,13 @@
+    return fetch(`https://api.github.com/repos/${path.join(this.repo, 'contents', filename)}`, {
+      method: 'PUT',
+      headers: {
+        accept: 'application/vnd.github.v3+json',
+        authorization: `token ${this.token}`,
+        'user-agent': 'Waline',
+      },
+      body: JSON.stringify({
+        sha,
+        message: 'feat(waline): update comment data',
+        content: Buffer.from(content, 'utf-8').toString('base64'),
+      }),
+    });

@@ -14,11 +14,10 @@
   },
   "homepage": "https://github.com/walinejs/netlify-starter#readme",
   "scripts": {
-    "postinstall": "patch-package"
+    "postinstall": "node scripts/patch-deps.js"
   },
   "dependencies": {
     "@waline/vercel": "^1.41.6",
-    "patch-package": "^8.0.1",
     "serverless-http": "^4.0.0"
   },
   "overrides": {
