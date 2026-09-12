@@ -16,5 +16,13 @@
   "dependencies": {
     "@waline/vercel": "^1.41.6",
     "serverless-http": "^4.0.0"
+  },
+  "overrides": {
+    "@mathjax/src": "file:./stubs/empty-stub",
+    "@mathjax/mathjax-newcm-font": "file:./stubs/empty-stub",
+    "@mathjax/mathjax-tex-font": "file:./stubs/empty-stub",
+    "speech-rule-engine": "file:./stubs/empty-stub",
+    "leancloud-storage": "file:./stubs/empty-stub",
+    "leancloud-realtime": "file:./stubs/empty-stub"
   }
 }

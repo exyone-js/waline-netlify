@@ -4,7 +4,11 @@
 [functions]
   directory = "netlify/functions/"
   node_bundler = "esbuild"
+  # @waline/vercel 基于 thinkjs，含动态 require，esbuild 静态打包会破坏运行时，
+  # 故外置由 Node 运行时加载；可选重依赖（mathjax/leancloud）已通过 package.json
+  # overrides 桩化，外置包总体积约 94MB，低于 250MB 限制
   external_node_modules = ["@waline/vercel"]
 
 [functions."comment"]
+  # 邮件通知、Akismet、GitHub API 等场景可能较慢，放宽至函数实际上限
   timeout = 26

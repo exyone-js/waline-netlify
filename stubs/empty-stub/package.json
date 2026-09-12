@@ -1,0 +1,11 @@
+{
+  "name": "empty-stub",
+  "version": "1.0.0",
+  "main": "index.cjs",
+  "exports": {
+    ".": "./index.cjs",
+    "./sync": "./index.cjs",
+    "./*": "./index.cjs",
+    "./package.json": "./package.json"
+  }
+}
