@@ -1,0 +1,33 @@
+diff --git a/node_modules/@waline/vercel/src/service/storage/github.js b/node_modules/@waline/vercel/src/service/storage/github.js
+index b60a12a..5b00107 100644
+--- a/node_modules/@waline/vercel/src/service/storage/github.js
++++ b/node_modules/@waline/vercel/src/service/storage/github.js
+@@ -65,7 +65,27 @@ class Github {
+         },
+       },
+     )
+-      .then((resp) => resp.json())
++      .then(async (resp) => {
++        const data = await resp.json().catch(() => ({}));
++
++        // 文件首次不存在时 GitHub 返回 404 且响应体无 content 字段；
++        // 必须在此抛出带 statusCode 的错误，否则 Buffer.from(undefined) 会崩溃
++        if (resp.status === 404) {
++          const error = new Error(data.message || 'NOT FOUND');
++
++          error.statusCode = 404;
++          throw error;
++        }
++
++        if (!resp.ok || data.content === undefined) {
++          const error = new Error(data.message || `GitHub API error: ${resp.status}`);
++
++          error.statusCode = resp.status;
++          throw error;
++        }
++
++        return data;
++      })
+       .catch((err) => {
+         const isTooLarge = err.message.includes('"too_large"');
+ 
