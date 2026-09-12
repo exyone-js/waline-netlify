@@ -19,12 +19,12 @@
     "serverless-http": "^4.0.0"
   },
   "overrides": {
-    "@mathjax/src": "file:./deps-overrides/empty-stub",
-    "@mathjax/mathjax-newcm-font": "file:./deps-overrides/empty-stub",
-    "@mathjax/mathjax-tex-font": "file:./deps-overrides/empty-stub",
-    "speech-rule-engine": "file:./deps-overrides/empty-stub",
-    "leancloud-storage": "file:./deps-overrides/empty-stub",
-    "leancloud-realtime": "file:./deps-overrides/empty-stub",
+    "@mathjax/src": "file:./overrides/empty-stub",
+    "@mathjax/mathjax-newcm-font": "file:./overrides/empty-stub",
+    "@mathjax/mathjax-tex-font": "file:./overrides/empty-stub",
+    "speech-rule-engine": "file:./overrides/empty-stub",
+    "leancloud-storage": "file:./overrides/empty-stub",
+    "leancloud-realtime": "file:./overrides/empty-stub",
     "jsdom": "26.1.0"
   }
 }

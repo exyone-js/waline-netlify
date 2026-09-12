@@ -3,11 +3,13 @@
 /**
  * 运行时修正 @waline/vercel 的 GitHub 存储适配器（不修改 node_modules）。
  *
- * 上游 src/service/storage/github.js 有两个缺陷：
+ * 上游 src/service/storage/github.js 存在以下问题：
  *   1. get() 不校验 HTTP 状态：数据文件尚不存在时 GitHub 返回 404，响应体没有
  *      content 字段，Buffer.from(undefined) 会抛 TypeError —— 首次评论必然崩溃；
  *   2. set() 不校验写入结果：GitHub 返回 4xx/5xx 时异常被静默吞掉，表现为
- *      "评论提交成功，但刷新后消失"。
+ *      "评论提交成功，但刷新后消失"；
+ *   3. GITHUB_REPO 未做归一化：粘贴成完整 URL、带 .git 或首尾空白时，请求会命中
+ *      错误地址而返回 404。
  *
  * 为什么在运行时修正，而不是构建期打补丁：Netlify 等 CI 会复用依赖缓存，可能
  * 安装到旧版本的包，构建期的源码补丁（patch-package 或字符串替换）会因此失败。
@@ -21,6 +23,17 @@ const path = require('node:path');
 
 const API = 'https://api.github.com/repos';
 
+/**
+ * 归一化 GITHUB_REPO：环境变量常被粘贴成完整 URL 或带 .git / 首尾空白，
+ * 这些都会让请求拼出错误地址并返回 404。
+ */
+const normalizeRepo = (repo) =>
+  String(repo ?? '')
+    .trim()
+    .replace(/^https?:\/\/(?:www\.)?github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/^\/+|\/+$/g, '');
+
 const authHeaders = (token) => ({
   accept: 'application/vnd.github.v3+json',
   authorization: `token ${token}`,
@@ -33,6 +46,13 @@ const httpError = (status, message) => {
   error.statusCode = status;
   return error;
 };
+
+/** 仓库是否可访问：GitHub 对无权访问的仓库同样返回 404，需额外区分。 */
+async function repoAccessible(git) {
+  const res = await fetch(`${API}/${git.repo}`, { headers: authHeaders(git.token) });
+
+  return res.status !== 404;
+}
 
 /**
  * 读取数据文件。
@@ -62,7 +82,7 @@ async function readFile(git, filename) {
 
 /**
  * 写入数据文件。
- * 失败时抛出 GitHub 返回的真实原因，避免评论被静默丢弃。
+ * 失败时抛出可定位的错误，避免评论被静默丢弃。
  */
 async function writeFile(git, filename, content, { sha } = {}) {
   const body = {
@@ -84,6 +104,19 @@ async function writeFile(git, filename, content, { sha } = {}) {
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
+    if (res.status === 404 && !(await repoAccessible(git))) {
+      throw httpError(
+        404,
+        `无法访问 GitHub 仓库 "${git.repo}"：请确认 GITHUB_REPO 为 owner/repo 形式，且 token 已授权访问该仓库`,
+      );
+    }
+    if (res.status === 404) {
+      throw httpError(
+        404,
+        `GitHub 写入失败：仓库 "${git.repo}" 可访问，但文件 "${filename}" 或默认分支不存在；若仓库为空，请先创建一次提交后重试`,
+      );
+    }
+
     const detail = data.message || res.statusText || 'unknown';
 
     throw httpError(res.status, `GitHub write failed (${res.status}): ${detail}`);
@@ -92,12 +125,15 @@ async function writeFile(git, filename, content, { sha } = {}) {
   return data;
 }
 
-/** 用修正后的实现替换实例上的 get / set。 */
+/** 用修正后的实现替换实例上的 get / set，并归一化仓库地址与 token。 */
 function wrapGithub(git) {
   if (!git || git.__walineFixed) {
     return git;
   }
+
   git.__walineFixed = true;
+  git.repo = normalizeRepo(git.repo);
+  git.token = String(git.token ?? '').trim();
   git.get = (filename) => readFile(git, filename);
   git.set = (filename, content, options) => writeFile(git, filename, content, options);
 

@@ -20,9 +20,9 @@ const http = require('node:http');
 const Waline = require('@waline/vercel');
 const serverless = require('serverless-http');
 
-const { applyGithubStorageFix } = require('../../deps-overrides/waline-github-storage');
+const { applyGithubStorageFix } = require('../../overrides/waline-github-storage');
 
-// 修正上游 GitHub 存储适配器的缺陷（见 deps-overrides/waline-github-storage.js）。
+// 修正上游 GitHub 存储适配器的缺陷（见 overrides/waline-github-storage.js）。
 // 需在创建应用之前执行；此时 thinkjs 全局已由 require('@waline/vercel') 初始化。
 applyGithubStorageFix();
 
