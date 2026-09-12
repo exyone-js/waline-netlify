@@ -1,3 +1,0 @@
-      .then((resp) => resp.json())
-      .catch((err) => {
-        const isTooLarge = err.message.includes('"too_large"');
