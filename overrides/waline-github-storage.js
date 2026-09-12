@@ -9,7 +9,12 @@
  *   2. set() 不校验写入结果：GitHub 返回 4xx/5xx 时异常被静默吞掉，表现为
  *      "评论提交成功，但刷新后消失"；
  *   3. GITHUB_REPO 未做归一化：粘贴成完整 URL、带 .git 或首尾空白时，请求会命中
- *      错误地址而返回 404。
+ *      错误地址而返回 404；
+ *   4. 主键字段名不一致（致命）：内存数据用 `id`，而 CSV 表头列是 `objectId`。
+ *      写盘时 fast-csv 按表头取值，对象上没有 objectId 键 → 主键列恒为空；
+ *      读回后 select() 解构 `id` 又得到 undefined。后果：
+ *        - 评论 objectId 全空，前端无法挂载、无法管理；
+ *        - 登录成功后 jwt.sign(undefined) 抛 "payload is required"，无法登录。
  *
  * 为什么在运行时修正，而不是构建期打补丁：Netlify 等 CI 会复用依赖缓存，可能
  * 安装到旧版本的包，构建期的源码补丁（patch-package 或字符串替换）会因此失败。
@@ -141,6 +146,49 @@ function wrapGithub(git) {
 }
 
 /**
+ * 生成主键。与上游 add() 保持同一算法（Math.random base36），保证风格一致；
+ * 仅用于修复历史脏数据（objectId 列为空的旧行）。
+ */
+const genId = () => Math.random().toString(36).slice(2, 15);
+
+/**
+ * 修正 GitHub CSV 存储实例的主键读写（问题 4）。
+ *
+ * - collection()：fast-csv 读回的行以 `objectId` 为键，而内部逻辑统一用 `id`
+ *   （select/update/delete/add 均解构或写入 id）。读回后统一映射为 id；
+ *   对历史遗留的空主键行补一个 id，避免再次写盘时仍为空、且使该行可被管理。
+ * - save()：写盘前把内部的 `id` 映射回 CSV 列 `objectId`，fast-csv 才会把主键
+ *   写进 objectId 列（否则该列恒为空）。
+ */
+function wrapStorage(Storage) {
+  const proto = Storage.prototype;
+  const { collection, save } = proto;
+
+  proto.collection = async function patchedCollection(tableName) {
+    const rows = await collection.call(this, tableName);
+
+    rows.forEach((row) => {
+      if (row.id === undefined) {
+        // fast-csv 用表头命名，主键在 objectId；空值（历史脏数据）则补齐
+        row.id = row.objectId === undefined || row.objectId === '' ? genId() : row.objectId;
+      }
+    });
+
+    return rows;
+  };
+
+  proto.save = async function patchedSave(tableName, data, sha) {
+    // 内部 id -> CSV objectId；不修改原数组元素，避免污染调用方持有的对象
+    const mapped = data.map(({ id, objectId, ...rest }) => ({
+      objectId: id ?? objectId ?? '',
+      ...rest,
+    }));
+
+    return save.call(this, tableName, mapped, sha);
+  };
+}
+
+/**
  * 应用修正。通过原型访问器拦截构造函数中的 `this.git = new Github(...)`。
  * thinkjs 的 loader 使用原生 require 加载该模块，与本文件拿到的是同一个类对象，
  * 因此对原型的改动会作用于它创建的所有实例。
@@ -152,6 +200,8 @@ function applyGithubStorageFix() {
     return;
   }
   GithubStorage.__walineFixed = true;
+
+  wrapStorage(GithubStorage);
 
   Object.defineProperty(GithubStorage.prototype, 'git', {
     configurable: true,
