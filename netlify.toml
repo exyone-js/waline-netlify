@@ -1,6 +1,10 @@
 [build.environment]
   NODE_VERSION = "24"
-  
+
 [functions]
   directory = "netlify/functions/"
   node_bundler = "esbuild"
+  external_node_modules = ["@waline/vercel"]
+
+[functions."comment"]
+  timeout = 26
