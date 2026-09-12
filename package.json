@@ -23,6 +23,7 @@
     "@mathjax/mathjax-tex-font": "file:./stubs/empty-stub",
     "speech-rule-engine": "file:./stubs/empty-stub",
     "leancloud-storage": "file:./stubs/empty-stub",
-    "leancloud-realtime": "file:./stubs/empty-stub"
+    "leancloud-realtime": "file:./stubs/empty-stub",
+    "jsdom": "27.0.0"
   }
 }
