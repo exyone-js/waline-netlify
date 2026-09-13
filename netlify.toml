@@ -12,3 +12,8 @@
 [functions."comment"]
   # 邮件通知、Akismet、GitHub API 等场景可能较慢，放宽至函数实际上限
   timeout = 26
+
+[[redirects]]
+from = "/favicon.ico"
+to = "https://exyon.ee/assets/img/avatar.png"
+status = 301
