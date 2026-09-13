@@ -14,6 +14,11 @@
   timeout = 26
 
 [[redirects]]
-from = "/favicon.ico"
-to = "https://exyon.ee/assets/img/favicon.png"
-status = 301
+  from = "/api/*"
+  to = "/.netlify/functions/comment/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/favicon.ico"
+  to = "https://exyon.ee/assets/img/favicon.png"
+  status = 301
