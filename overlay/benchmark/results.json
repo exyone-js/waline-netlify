@@ -1,0 +1,210 @@
+[
+  {
+    "total": 1000,
+    "shardCount": 20,
+    "legacyFileBytes": 354336,
+    "coldStart": {
+      "elapsed": 162.3433,
+      "calls": 23,
+      "bytes": 481184
+    },
+    "new": {
+      "p50": 0.114,
+      "p95": 0.2011,
+      "calls": 0,
+      "bytes": 0,
+      "page": {
+        "elapsed": 0.5039,
+        "calls": 0,
+        "bytes": 0
+      },
+      "write": {
+        "calls": 7,
+        "bytes": 3428,
+        "requestBytes": 27465
+      },
+      "burst": {
+        "calls": 7,
+        "bytes": 3428,
+        "requestBytes": 44773
+      }
+    },
+    "legacy": {
+      "p50": 24.6759,
+      "p95": 26.915,
+      "calls": 1,
+      "bytes": 472592,
+      "page": {
+        "elapsed": 99.5844,
+        "calls": 4,
+        "bytes": 1890368
+      },
+      "write": {
+        "calls": 2,
+        "bytes": 945184,
+        "requestBytes": 472905
+      },
+      "burst": {
+        "calls": 100,
+        "bytes": 47259200,
+        "requestBytes": 23645234
+      }
+    }
+  },
+  {
+    "total": 5000,
+    "shardCount": 100,
+    "legacyFileBytes": 1777296,
+    "coldStart": {
+      "elapsed": 212.8381,
+      "calls": 103,
+      "bytes": 2412921
+    },
+    "new": {
+      "p50": 0.1098,
+      "p95": 0.1975,
+      "calls": 0,
+      "bytes": 0,
+      "page": {
+        "elapsed": 0.3703,
+        "calls": 0,
+        "bytes": 0
+      },
+      "write": {
+        "calls": 7,
+        "bytes": 15165,
+        "requestBytes": 39201
+      },
+      "burst": {
+        "calls": 7,
+        "bytes": 15165,
+        "requestBytes": 56497
+      }
+    },
+    "legacy": {
+      "p50": 106.7693,
+      "p95": 136.1092,
+      "calls": 2,
+      "bytes": 2369969,
+      "page": {
+        "elapsed": 430.6795,
+        "calls": 8,
+        "bytes": 9479876
+      },
+      "write": {
+        "calls": 3,
+        "bytes": 2370112,
+        "requestBytes": 2370185
+      },
+      "burst": {
+        "calls": 150,
+        "bytes": 118505600,
+        "requestBytes": 118509238
+      }
+    }
+  },
+  {
+    "total": 10000,
+    "shardCount": 200,
+    "legacyFileBytes": 3570996,
+    "coldStart": {
+      "elapsed": 439.403,
+      "calls": 203,
+      "bytes": 4847853
+    },
+    "new": {
+      "p50": 0.1296,
+      "p95": 0.1993,
+      "calls": 0,
+      "bytes": 0,
+      "page": {
+        "elapsed": 0.4617,
+        "calls": 0,
+        "bytes": 0
+      },
+      "write": {
+        "calls": 7,
+        "bytes": 30097,
+        "requestBytes": 54133
+      },
+      "burst": {
+        "calls": 7,
+        "bytes": 30097,
+        "requestBytes": 71445
+      }
+    },
+    "legacy": {
+      "p50": 214.4473,
+      "p95": 258.9748,
+      "calls": 2,
+      "bytes": 4761569,
+      "page": {
+        "elapsed": 998.5708,
+        "calls": 8,
+        "bytes": 19046276
+      },
+      "write": {
+        "calls": 3,
+        "bytes": 4761712,
+        "requestBytes": 4761785
+      },
+      "burst": {
+        "calls": 150,
+        "bytes": 238085600,
+        "requestBytes": 238089234
+      }
+    }
+  },
+  {
+    "total": 50000,
+    "shardCount": 990,
+    "legacyFileBytes": 17920596,
+    "coldStart": {
+      "elapsed": 2035.7434,
+      "calls": 993,
+      "bytes": 24323002
+    },
+    "new": {
+      "p50": 0.0703,
+      "p95": 0.1903,
+      "calls": 0,
+      "bytes": 0,
+      "page": {
+        "elapsed": 0.5769,
+        "calls": 0,
+        "bytes": 0
+      },
+      "write": {
+        "calls": 7,
+        "bytes": 148086,
+        "requestBytes": 172121
+      },
+      "burst": {
+        "calls": 7,
+        "bytes": 148086,
+        "requestBytes": 189421
+      }
+    },
+    "legacy": {
+      "p50": 1155.81,
+      "p95": 1215.9086,
+      "calls": 2,
+      "bytes": 23894371,
+      "page": {
+        "elapsed": 4641.7554,
+        "calls": 8,
+        "bytes": 95577484
+      },
+      "write": {
+        "calls": 3,
+        "bytes": 23894515,
+        "requestBytes": 23894585
+      },
+      "burst": {
+        "calls": 150,
+        "bytes": 1194725750,
+        "requestBytes": 1194729242
+      }
+    }
+  }
+]
