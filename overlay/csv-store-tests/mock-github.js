@@ -12,7 +12,7 @@
 
 const http = require('node:http');
 
-const { gitBlobSha } = require('../storage/github-client');
+const { gitBlobSha } = require('../csv-store/github-client');
 
 class MockGitHub {
   constructor({ owner = 'owner', repo = 'repo', branch = 'main', contentsMaxBytes = 1024 * 1024 } = {}) {

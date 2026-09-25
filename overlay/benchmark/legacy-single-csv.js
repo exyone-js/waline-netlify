@@ -12,7 +12,7 @@
  * 条件查询语义直接复用新实现的 compileWhere，保证两边"查的是同一件事"。
  */
 
-const { compileWhere } = require('../storage/csv-shard-cache');
+const { compileWhere } = require('../csv-store/csv-shard-cache');
 
 const CSV_HEADERS = {
   Comment: [

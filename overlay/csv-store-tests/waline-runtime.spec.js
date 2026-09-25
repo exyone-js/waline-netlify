@@ -4,7 +4,7 @@
  * 端到端集成：把真实的 @waline/vercel 跑起来，只把 GitHub 换成内存 mock。
  *
  * 前面的用例都是直接驱动 CsvModel，而这里要验证的是"接线是否正确"：
- *   Waline({ model: customModel, plugins: [walineDataPlugin] })
+ *   Waline({ model: customModel, plugins: [csvStorePlugin] })
  * 是否真的被 thinkjs 采纳（model 会被 think.config('customModel') 接住，
  * 并且 getModel 是"直接调用"而不是 new）、插件中间件是否真的在响应前落盘、
  * 真实的 Waline 路由 /api/comment 是否能用我们的存储完成读写。
@@ -34,7 +34,7 @@ test('真实 Waline 运行时 + 自定义分片存储：发评论 → 读列表 
   process.env.GITHUB_BRANCH = 'main';
   process.env.GITHUB_API_BASE = mock.apiBase;
   process.env.JWT_TOKEN = 'test-jwt-key';
-  process.env.CSV_STORE_DIR = 'waline-data';
+  process.env.CSV_STORE_DIR = 'data';
   // Waline 内置了 akismet 的默认 key，不关掉就会真的联网做垃圾评论检测
   // （既慢又不确定），这里按官方文档的方式关掉
   process.env.AKISMET_KEY = 'false';
@@ -42,11 +42,11 @@ test('真实 Waline 运行时 + 自定义分片存储：发评论 → 读列表 
   // eslint-disable-next-line global-require
   const Waline = require('@waline/vercel');
   // eslint-disable-next-line global-require
-  const { customModel, walineDataPlugin, resetStore } = require('../storage');
+  const { customModel, csvStorePlugin, resetStore } = require('../csv-store');
 
   resetStore();
 
-  const server = http.createServer(Waline({ env: 'netlify', model: customModel, plugins: [walineDataPlugin] }));
+  const server = http.createServer(Waline({ env: 'netlify', model: customModel, plugins: [csvStorePlugin] }));
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 
@@ -78,7 +78,7 @@ test('真实 Waline 运行时 + 自定义分片存储：发评论 → 读列表 
 
   const commentShards = () =>
     [...mock.listFiles().keys()].filter(
-      (path) => path.startsWith('waline-data/comments/') && path.endsWith('.csv') && !path.endsWith('_manifest.csv'),
+      (path) => path.startsWith('data/comments/') && path.endsWith('.csv') && !path.endsWith('_manifest.csv'),
     );
 
   // 1. 空库先返回空列表（验证"数据文件尚不存在"这条路径不会炸）
@@ -113,7 +113,7 @@ test('真实 Waline 运行时 + 自定义分片存储：发评论 → 读列表 
   assert.equal(shardText.includes('来自端到端测试的评论'), true, '分片里应包含原始 markdown');
   assert.equal(shardText.split('\n')[0].startsWith('objectId,'), true, '分片必须带表头');
 
-  const manifest = mock.readText('waline-data/comments/_manifest.csv');
+  const manifest = mock.readText('data/comments/_manifest.csv');
 
   assert.equal(manifest.trim().split('\n').length, 2, 'manifest 应记录 1 个分片');
   assert.equal(manifest.includes(',1,'), true, 'manifest 应记录 row_count=1');
@@ -181,19 +181,19 @@ test('真实 Waline 运行时 + 自定义分片存储：发评论 → 读列表 
 
   // 8. 运维接口：管理员可创建快照，未登录必须被拒绝。
   //    这里同时验证了我们自实现的 HS256 校验能接受 Waline 真实签发的 token。
-  const unauth = await postJson('/api/waline-data/snapshot', {});
+  const unauth = await postJson('/api/csv-store/snapshot', {});
 
   assert.equal(unauth.status, 401);
   assert.equal(unauth.body.errno, 1);
 
-  const snapshot = await fetch(`${base}/api/waline-data/snapshot`, { method: 'POST', headers: auth });
+  const snapshot = await fetch(`${base}/api/csv-store/snapshot`, { method: 'POST', headers: auth });
   const snapshotBody = await snapshot.json();
 
   assert.equal(snapshot.status, 200, `创建快照失败：${JSON.stringify(snapshotBody)}`);
   assert.equal(snapshotBody.errno, 0);
   assert.equal(snapshotBody.data.created.files > 0, true, '快照应复制已有数据文件');
 
-  const snapshotList = await getAuthorized('/api/waline-data/snapshot');
+  const snapshotList = await getAuthorized('/api/csv-store/snapshot');
 
   assert.equal(snapshotList.errno, 0);
   assert.equal(snapshotList.data.snapshots.length, 1);

@@ -13,7 +13,7 @@
  * 中间件（plugins.middlewares）负责两件事：
  *   1. 响应返回前 await 一次 flush()，保证"响应 200"等于"已经落盘"。
  *      serverless 实例在响应后被冻结，只靠定时器刷盘会丢数据。
- *   2. /waline-data/* 运维接口（快照、恢复、分片合并），仅管理员可用。
+ *   2. /csv-store/* 运维接口（快照、恢复、分片合并），仅管理员可用。
  */
 
 const { createHmac, timingSafeEqual } = require('node:crypto');
@@ -49,7 +49,7 @@ function loadConfig(env = process.env) {
     // 仅用于测试/自建代理；默认走 GitHub 官方 API
     apiBase: env.GITHUB_API_BASE || 'https://api.github.com',
 
-    storeDir: env.CSV_STORE_DIR || 'waline-data',
+    storeDir: env.CSV_STORE_DIR || 'data',
     shardMaxRows: intEnv('SHARD_MAX_ROWS', 2000, env),
     hashLen: intEnv('SHARD_HASH_LEN', 2, env),
 
@@ -240,7 +240,7 @@ async function isAdministrator(ctx, cache) {
 // 运维接口
 // ---------------------------------------------------------------------------
 
-const ADMIN_ROUTE = /\/waline-data\/(?<action>[a-z]+)\/?$/u;
+const ADMIN_ROUTE = /\/csv-store\/(?<action>[a-z]+)\/?$/u;
 
 async function handleAdminRequest(ctx, action) {
   const { cache, queue, snapshot, manager, logger } = getStore();
@@ -306,7 +306,7 @@ async function handleAdminRequest(ctx, action) {
         ctx.body = { errno: 1, errmsg: `不支持的运维操作：${action} ${ctx.method}` };
     }
   } catch (err) {
-    logger.error?.(`[waline-data] 运维操作 ${action} 失败：`, err);
+    logger.error?.(`[csv-store] 运维操作 ${action} 失败：`, err);
     ctx.status = 500;
     ctx.body = { errno: 1, errmsg: err.message };
   }
@@ -318,7 +318,7 @@ async function handleAdminRequest(ctx, action) {
  * 顺序很关键——运维接口必须在 Waline 路由之前拦下，否则会先吃到 404；
  * 而 flush 必须在业务处理之后、响应发出之前完成。
  */
-const walineDataPlugin = {
+const csvStorePlugin = {
   middlewares: [
     async (ctx, next) => {
       const matched = ADMIN_ROUTE.exec(ctx.path);
@@ -341,10 +341,10 @@ const walineDataPlugin = {
         await getStore().queue.flush();
       } catch (err) {
         if (businessError) {
-          console.error('[waline-data] 业务异常且落盘失败：', err);
+          console.error('[csv-store] 业务异常且落盘失败：', err);
         } else {
           // 写入没落盘就绝不能回 200，否则用户会以为评论保存成功
-          console.error('[waline-data] 评论落盘失败：', err);
+          console.error('[csv-store] 评论落盘失败：', err);
           ctx.status = 500;
           ctx.body = { errno: 1, errmsg: '评论存储提交失败，请稍后重试' };
 
@@ -360,7 +360,7 @@ const walineDataPlugin = {
         await getStore().snapshot.maybeRunDaily();
       } catch (err) {
         // 快照失败不应影响正常请求
-        console.error('[waline-data] 每日快照失败：', err);
+        console.error('[csv-store] 每日快照失败：', err);
       }
     },
   ],
@@ -369,7 +369,7 @@ const walineDataPlugin = {
 module.exports = {
   customModel,
   createModelFactory,
-  walineDataPlugin,
+  csvStorePlugin,
   loadConfig,
   createStore,
   getStore,

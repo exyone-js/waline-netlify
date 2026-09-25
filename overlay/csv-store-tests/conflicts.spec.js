@@ -10,7 +10,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
-const { gitBlobSha } = require('../storage/github-client');
+const { gitBlobSha } = require('../csv-store/github-client');
 const { createHarness, commentData } = require('./helpers');
 
 /**

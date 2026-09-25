@@ -34,7 +34,7 @@ test('快照复用已有 blob，零内容上传', async (t) => {
   const after = harness.mock.listFiles();
 
   for (const [path, meta] of before) {
-    const snapshotPath = `waline-data/_snapshots/2026-09-24/${path}`;
+    const snapshotPath = `data/_snapshots/2026-09-24/${path}`;
 
     assert.equal(after.get(snapshotPath)?.sha, meta.sha, `快照文件 ${path} 应引用同一个 blob`);
   }

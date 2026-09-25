@@ -138,11 +138,11 @@ const toCell = (value) => {
 class ShardManager {
   /**
    * @param {object} options
-   * @param {string} options.storeDir  数据根目录（仓库根相对路径，如 waline-data）
+   * @param {string} options.storeDir  数据根目录（仓库根相对路径，默认 data）
    * @param {number} options.shardMaxRows 单分片行数上限
    * @param {number} options.hashLen   目录哈希前缀长度
    */
-  constructor({ storeDir = 'waline-data', shardMaxRows = 2000, hashLen = 2 } = {}) {
+  constructor({ storeDir = 'data', shardMaxRows = 2000, hashLen = 2 } = {}) {
     this.storeDir = String(storeDir).replace(/^\/+|\/+$/gu, '');
     this.shardMaxRows = shardMaxRows;
     this.hashLen = hashLen;

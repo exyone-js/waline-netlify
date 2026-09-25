@@ -277,7 +277,7 @@ class ShardWriteQueue {
   buildCommitMessage(tables, fileCount) {
     const names = tables.map((table) => this.manager.tableDir(table)).join('/');
 
-    return `chore(waline-data): update ${names} (${fileCount} files)`;
+    return `chore(csv-store): update ${names} (${fileCount} files)`;
   }
 }
 

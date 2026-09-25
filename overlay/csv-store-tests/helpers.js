@@ -8,7 +8,7 @@
  */
 
 const { MockGitHub } = require('./mock-github');
-const { loadConfig, createStore, createModelFactory } = require('../storage');
+const { loadConfig, createStore, createModelFactory } = require('../csv-store');
 
 /** 无人值守的 logger：避免测试输出被日志淹没。 */
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };

@@ -11,13 +11,13 @@ const { createHarness, commentData, userData, apiCallsMatching } = require('./he
 
 const shardFilesOf = (mock, table) =>
   [...mock.listFiles().keys()].filter(
-    (path) => path.startsWith(`waline-data/${table}/`) && path.endsWith('.csv') && !path.endsWith('_manifest.csv'),
+    (path) => path.startsWith(`data/${table}/`) && path.endsWith('.csv') && !path.endsWith('_manifest.csv'),
   );
 
 /** mock 收到的"分片内容下载"请求（不含 manifest）。 */
 const shardDownloadsOf = (mock, table) =>
   mock.requestLog.filter(
-    (entry) => entry.path.includes(`/contents/waline-data/${table}/`) && !entry.path.includes('_manifest.csv'),
+    (entry) => entry.path.includes(`/contents/data/${table}/`) && !entry.path.includes('_manifest.csv'),
   );
 
 test('分片路由：同一 url 落同一分片，不同 url 落不同分片', async (t) => {
@@ -73,7 +73,7 @@ test('Users 按 objectId 前两位分片，文件名与目录同名', async (t) 
 
   assert.ok(files.length > 1);
   for (const path of files) {
-    const matched = /^waline-data\/users\/(?<dir>[^/]+)\/(?<name>[^/]+?)(?:-\d+)?\.csv$/u.exec(path);
+    const matched = /^data\/users\/(?<dir>[^/]+)\/(?<name>[^/]+?)(?:-\d+)?\.csv$/u.exec(path);
 
     assert.ok(matched, `不符合分片命名的文件：${path}`);
     assert.equal(matched.groups.dir, matched.groups.name);

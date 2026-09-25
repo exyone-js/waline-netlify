@@ -97,7 +97,7 @@ class SnapshotManager {
     }
 
     const result = await this.github.commitChanges({
-      message: `chore(waline-data): snapshot ${date} (${files.size} files)`,
+      message: `chore(csv-store): snapshot ${date} (${files.size} files)`,
       upserts,
       head,
     });
@@ -134,7 +134,7 @@ class SnapshotManager {
     }
 
     await this.github.commitChanges({
-      message: `chore(waline-data): prune snapshots older than ${this.keepDays} days`,
+      message: `chore(csv-store): prune snapshots older than ${this.keepDays} days`,
       deletes,
       head,
     });
@@ -167,7 +167,7 @@ class SnapshotManager {
     const deletes = [...current.keys()].filter((path) => !snapshot.has(path));
 
     const result = await this.github.commitChanges({
-      message: `chore(waline-data): restore snapshot ${date}`,
+      message: `chore(csv-store): restore snapshot ${date}`,
       upserts,
       deletes,
       head,
@@ -190,7 +190,7 @@ class SnapshotManager {
    * 这里用"请求驱动"的惰性触发（每天首个经过 SNAPSHOT_HOUR 之后的请求触发一次），
    * 而不是依赖平台定时任务：Netlify/Vercel 的免费计划对 cron 支持不一，
    * 惰性触发在任意部署形态下都成立。需要更精确的时点可以：
-   *   - 用平台的 Scheduled Function 调 POST /waline-data/snapshot
+   *   - 用平台的 Scheduled Function 调 POST /csv-store/snapshot
    *   - 或用 VPS 的 crontab 调同一个接口
    */
   async maybeRunDaily(now = new Date()) {

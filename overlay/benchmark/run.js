@@ -7,7 +7,7 @@
  *   旧：单文件 CSV —— 每次查询下载整个文件，每次写入重写整个文件
  *   新：多 CSV 分片 + 内存索引 —— 查询只读索引命中的分片，写入只提交受影响的分片
  *
- * 两边都跑在同一套真实 HTTP 之上（内存版 GitHub mock，见 overlay/test/mock-github.js），
+ * 两边都跑在同一套真实 HTTP 之上（内存版 GitHub mock，见 overlay/csv-store-tests/mock-github.js），
  * 因此测到的差异来自方案本身，而不是网络或语言环境。
  *
  * 用法：npm run benchmark   （结果写入 overlay/benchmark/REPORT.md）
@@ -16,10 +16,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { MockGitHub } = require('../test/mock-github');
-const { loadConfig, createStore, createModelFactory } = require('../storage');
-const { gitBlobSha } = require('../storage/github-client');
-const { ShardManager } = require('../storage/shard-manager');
+const { MockGitHub } = require('../csv-store-tests/mock-github');
+const { loadConfig, createStore, createModelFactory } = require('../csv-store');
+const { gitBlobSha } = require('../csv-store/github-client');
+const { ShardManager } = require('../csv-store/shard-manager');
 const { LegacySingleCsvStorage } = require('./legacy-single-csv');
 
 const SIZES = [1000, 5000, 10000, 50000];
@@ -170,10 +170,12 @@ async function runSize(total) {
 
   await mock.start();
 
-  const manager = new ShardManager({ storeDir: 'waline-data' });
+  const manager = new ShardManager({ storeDir: 'data' });
   const rows = buildComments(total);
   const shardCount = seedSharded(mock, manager, rows);
 
+  // 旧方案的 GITHUB_PATH 默认值就是 data，落点 data/Comment.csv 与新方案的
+  // data/comments/... 分片天然共存（文件名不同、不冲突），正好对应真实迁移现场。
   seedLegacy(mock, 'data', rows);
 
   const config = {
@@ -301,7 +303,7 @@ function buildReport(results) {
   sections.push(`# 单文件 CSV → 多 CSV 分片 性能对比报告
 
 本报告由 \`npm run benchmark\` 自动生成，全部数字为实测值（\`overlay/benchmark/run.js\` +
-\`overlay/test/mock-github.js\` 内存版 GitHub API）。两个方案跑在同一套 HTTP 之上，
+\`overlay/csv-store-tests/mock-github.js\` 内存版 GitHub API）。两个方案跑在同一套 HTTP 之上，
 因此差异只来自数据访问方式本身。
 
 - 数据规模：${SIZES.map((size) => size.toLocaleString('en-US')).join(' / ')} 条评论

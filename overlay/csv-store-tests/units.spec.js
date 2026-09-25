@@ -4,12 +4,12 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { createHmac } = require('node:crypto');
 
-const { gitBlobSha } = require('../storage/github-client');
-const { ShardManager } = require('../storage/shard-manager');
-const { compileWhere, compareValues } = require('../storage/csv-shard-cache');
-const { verifyHs256 } = require('../storage/index');
+const { gitBlobSha } = require('../csv-store/github-client');
+const { ShardManager } = require('../csv-store/shard-manager');
+const { compileWhere, compareValues } = require('../csv-store/csv-shard-cache');
+const { verifyHs256 } = require('../csv-store/index');
 
-const manager = new ShardManager({ storeDir: 'waline-data', shardMaxRows: 3, hashLen: 2 });
+const manager = new ShardManager({ storeDir: 'data', shardMaxRows: 3, hashLen: 2 });
 
 test('gitBlobSha 与 git 的 blob 哈希一致', () => {
   // echo -n hello | git hash-object --stdin
@@ -23,14 +23,14 @@ test('gitBlobSha 与 git 的 blob 哈希一致', () => {
 test('分片路径稳定可预测', () => {
   const path = manager.shardPath('Comment', '/post-1');
 
-  assert.match(path, /^waline-data\/comments\/[0-9a-f]{2}\/[0-9a-f]{4}\.csv$/u);
+  assert.match(path, /^data\/comments\/[0-9a-f]{2}\/[0-9a-f]{4}\.csv$/u);
   // 同一个 url 一定落在同一个分片
   assert.equal(path, manager.shardPath('Comment', '/post-1'));
-  assert.equal(manager.shardPath('Counter', '/post-1'), `waline-data/counters${path.slice('waline-data/comments'.length)}`);
+  assert.equal(manager.shardPath('Counter', '/post-1'), `data/counters${path.slice('data/comments'.length)}`);
 
   const userShard = manager.shardPath('Users', 'a1b2c3');
 
-  assert.equal(userShard, `waline-data/users/a1/a1.csv`);
+  assert.equal(userShard, `data/users/a1/a1.csv`);
 });
 
 test('分片路径可以被反向解析，非分片路径返回 null', () => {
@@ -45,8 +45,8 @@ test('分片路径可以被反向解析，非分片路径返回 null', () => {
 
   assert.equal(split.suffix, '-2');
   assert.equal(split.prefix, parsed.prefix);
-  assert.equal(manager.parseShardPath('waline-data/comments/_manifest.csv'), null);
-  assert.equal(manager.parseShardPath('waline-data/_snapshots/2026-09-25/comments/ab/abcd.csv'), null);
+  assert.equal(manager.parseShardPath('data/comments/_manifest.csv'), null);
+  assert.equal(manager.parseShardPath('data/_snapshots/2026-09-25/comments/ab/abcd.csv'), null);
 });
 
 test('CSV 表头 = 规范列在前 + 动态列按字母序追加', () => {

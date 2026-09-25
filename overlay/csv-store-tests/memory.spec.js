@@ -14,9 +14,9 @@ const v8 = require('node:v8');
 const vm = require('node:vm');
 
 const { MockGitHub } = require('./mock-github');
-const { loadConfig, createStore, createModelFactory } = require('../storage');
-const { gitBlobSha } = require('../storage/github-client');
-const { ShardManager } = require('../storage/shard-manager');
+const { loadConfig, createStore, createModelFactory } = require('../csv-store');
+const { gitBlobSha } = require('../csv-store/github-client');
+const { ShardManager } = require('../csv-store/shard-manager');
 
 /**
  * 拿到真正的 global.gc。
@@ -76,7 +76,7 @@ test('10 万条评论的行对象 + 索引小于 100MB', async (t) => {
 
   t.after(() => mock.stop());
 
-  const manager = new ShardManager({ storeDir: 'waline-data' });
+  const manager = new ShardManager({ storeDir: 'data' });
   const byShard = new Map();
 
   for (const row of buildRows(TOTAL)) {

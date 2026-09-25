@@ -229,7 +229,7 @@ test('delete：按条件删除，且能清空整张表并删除分片文件', as
 
   const shardFiles = () =>
     [...harness.mock.listFiles().keys()].filter(
-      (path) => path.startsWith('waline-data/comments/') && path.endsWith('.csv') && !path.endsWith('_manifest.csv'),
+      (path) => path.startsWith('data/comments/') && path.endsWith('.csv') && !path.endsWith('_manifest.csv'),
     );
 
   assert.equal(shardFiles().length, 1);

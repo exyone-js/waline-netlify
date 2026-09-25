@@ -14,7 +14,7 @@
   },
   "homepage": "https://github.com/walinejs/netlify-starter#readme",
   "scripts": {
-    "test": "node --test \"overlay/test/*.spec.js\"",
+    "test": "node --test \"overlay/csv-store-tests/*.spec.js\"",
     "benchmark": "node overlay/benchmark/run.js"
   },
   "dependencies": {
