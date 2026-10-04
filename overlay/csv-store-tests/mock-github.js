@@ -37,6 +37,8 @@ class MockGitHub {
     this.bytesReceived = 0;
     /** 故障注入：{ pattern, status, times } */
     this.faults = [];
+    /** 下一次响应要带的头（用于测 Retry-After）：{ pattern, headers }，命中一次后清除 */
+    this.responseHeaders = null;
 
     this.server = null;
     this.port = 0;
@@ -155,8 +157,9 @@ class MockGitHub {
     return this.readFile(path)?.content?.toString('utf8') ?? null;
   }
 
-  failNext(pattern, status, times = 1) {
-    this.faults.push({ pattern, status, times });
+  /** @param {string} [message] 自定义错误文案（用于区分"限流 403"与"鉴权 403"） */
+  failNext(pattern, status, times = 1, message = `injected ${status}`) {
+    this.faults.push({ pattern, status, times, message });
   }
 
   reset() {
@@ -166,6 +169,7 @@ class MockGitHub {
     this.refs.clear();
     this.requestLog.length = 0;
     this.faults.length = 0;
+    this.responseHeaders = null;
     this.sequences = 0;
     this.bytesSent = 0;
     this.bytesReceived = 0;
@@ -203,7 +207,7 @@ class MockGitHub {
     this.server = null;
   }
 
-  send(res, status, body) {
+  send(res, status, body, headers) {
     const text = JSON.stringify(body ?? {});
     const size = Buffer.byteLength(text, 'utf8');
 
@@ -213,9 +217,29 @@ class MockGitHub {
     }
     this.bytesSent += size;
 
-    res.writeHead(status, { 'content-type': 'application/json' });
+    res.writeHead(status, { 'content-type': 'application/json', ...(headers ?? res.__headers ?? {}) });
 
     res.end(text);
+  }
+
+  /** 给下一批命中的响应附带头（例如 Retry-After）。 */
+  setResponseHeaders(pattern, headers) {
+    this.responseHeaders = { pattern, headers, times: 1 };
+  }
+
+  consumeHeaders(pathname) {
+    const rule = this.responseHeaders;
+
+    if (!rule || rule.times <= 0 || !pathname.includes(rule.pattern)) {
+      return {};
+    }
+    rule.times -= 1;
+
+    if (rule.times <= 0) {
+      this.responseHeaders = null;
+    }
+
+    return rule.headers;
   }
 
   async readBody(req) {
@@ -241,7 +265,7 @@ class MockGitHub {
       }
       fault.times -= 1;
 
-      return fault.status;
+      return { status: fault.status, message: fault.message ?? `injected ${fault.status}` };
     }
 
     return null;
@@ -254,6 +278,7 @@ class MockGitHub {
 
     res.__entry = entry;
     req.__entry = entry;
+    res.__headers = this.consumeHeaders(pathname);
     this.requestLog.push(entry);
 
     const prefix = `/repos/${this.owner}/${this.repo}`;
@@ -267,7 +292,7 @@ class MockGitHub {
     const injected = this.consumeFault(req.method, pathname);
 
     if (injected) {
-      this.send(res, injected, { message: `injected ${injected}` });
+      this.send(res, injected.status, { message: injected.message });
 
       return;
     }

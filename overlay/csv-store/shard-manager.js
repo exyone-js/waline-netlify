@@ -146,7 +146,6 @@ class ShardManager {
     this.storeDir = String(storeDir).replace(/^\/+|\/+$/gu, '');
     this.shardMaxRows = shardMaxRows;
     this.hashLen = hashLen;
-    this.snapshotDir = `${this.storeDir}/_snapshots`;
   }
 
   tableDir(table) {
@@ -169,10 +168,6 @@ class ShardManager {
 
   shardKeyField(table) {
     return SHARD_KEY_FIELD[table];
-  }
-
-  minKeyOf(table, row) {
-    return toCell(row[SHARD_KEY_FIELD[table]]);
   }
 
   /** 分片族前缀（不含 .csv 与裂变后缀），是"同 key 同族"的判定依据。 */

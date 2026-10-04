@@ -12,7 +12,20 @@ const { createHarness, commentData } = require('./helpers');
 const blobUploads = (mock) =>
   mock.requestLog.filter((entry) => entry.method === 'POST' && entry.path.endsWith('/git/blobs')).length;
 
-test('快照复用已有 blob，零内容上传', async (t) => {
+/** 从 head 沿父提交回溯，得到"当前可达的历史长度"（mock 不会删除历史对象）。 */
+const historyDepth = (mock) => {
+  let depth = 0;
+  let sha = mock.headCommit;
+
+  while (sha) {
+    depth += 1;
+    sha = mock.commits.get(sha)?.parents?.[0] ?? null;
+  }
+
+  return depth;
+};
+
+test('快照是一份引用清单：只上传清单本身，数据零上传', async (t) => {
   const harness = await createHarness();
 
   t.after(() => harness.dispose());
@@ -29,18 +42,115 @@ test('快照复用已有 blob，零内容上传', async (t) => {
 
   assert.equal(created.skipped, false);
   assert.equal(created.files, before.size);
-  assert.equal(blobUploads(harness.mock), 0, '快照不应重新上传任何文件内容');
+  assert.equal(blobUploads(harness.mock), 1, '只应上传快照清单这一个 blob');
 
-  const after = harness.mock.listFiles();
+  const manifestPath = 'data/_snapshots/2026-09-24.csv';
+  const listed = await harness.store.snapshot.snapshotFiles('2026-09-24');
 
+  assert.deepEqual([...listed.keys()].sort(), [...before.keys()].sort());
   for (const [path, meta] of before) {
-    const snapshotPath = `data/_snapshots/2026-09-24/${path}`;
-
-    assert.equal(after.get(snapshotPath)?.sha, meta.sha, `快照文件 ${path} 应引用同一个 blob`);
+    assert.equal(listed.get(path)?.sha, meta.sha, `清单里 ${path} 必须引用原 blob`);
   }
 
+  // 仓库里只多了一个文件：文件数不再随分片数 × 保留天数放大
+  assert.equal(harness.mock.listFiles().size, before.size + 1);
   assert.notEqual(harness.mock.headCommit, headBefore);
   assert.deepEqual(await harness.store.snapshot.listSnapshots(), ['2026-09-24']);
+  assert.equal(harness.mock.readText(manifestPath).split('\n')[0], 'path,sha');
+});
+
+test('旧格式的目录快照仍然可以恢复（向后兼容）', async (t) => {
+  const harness = await createHarness();
+
+  t.after(() => harness.dispose());
+
+  const comment = harness.model('Comment');
+
+  await comment.add(commentData({ url: '/legacy', comment: 'legacy-me' }));
+  await harness.store.queue.flush();
+
+  // 手工造一份"旧格式"快照：_snapshots/<date>/ 下按原路径复制一份
+  const files = harness.mock.listFiles();
+  const legacy = new Map();
+
+  for (const [path, meta] of files) {
+    legacy.set(`data/_snapshots/2026-01-01/${path}`, harness.mock.blobs.get(meta.sha));
+  }
+  harness.mock.externalCommit(legacy);
+
+  assert.deepEqual(await harness.store.snapshot.listSnapshots(), ['2026-01-01']);
+
+  // 抹掉当前数据，再从旧快照恢复
+  await comment.add(commentData({ url: '/newer', comment: 'newer-me' }));
+  await harness.store.queue.flush();
+  assert.equal(await comment.count({}), 2);
+
+  const restored = await harness.store.snapshot.restore('2026-01-01');
+
+  assert.equal(restored.restored > 0, true);
+  assert.equal(await comment.count({}), 1, '旧快照应完整恢复，新写入的被覆盖');
+  assert.equal(await comment.count({ url: '/legacy' }), 1);
+});
+
+test('重置仓库：历史提交被丢弃，只保留当前数据', async (t) => {
+  const harness = await createHarness();
+
+  t.after(() => harness.dispose());
+
+  const comment = harness.model('Comment');
+
+  await comment.add(commentData({ url: '/a', comment: 'a' }));
+  await harness.store.queue.flush();
+  await harness.store.snapshot.createSnapshot('2026-09-24');
+
+  // 制造一批历史提交（也顺便把快照目录树塞进去）
+  for (let index = 0; index < 5; index += 1) {
+    await comment.add(commentData({ url: '/a', comment: `noise-${index}` }));
+    await harness.store.queue.flush();
+  }
+
+  assert.equal(historyDepth(harness.mock) > 5, true);
+
+  const result = await harness.store.snapshot.resetRepository();
+
+  assert.equal(result.reset, true);
+
+  // 重置后：可达历史只剩一个提交，且它没有父提交
+  assert.equal(historyDepth(harness.mock), 1, '历史提交应被整体丢弃');
+  assert.deepEqual(harness.mock.commits.get(harness.mock.headCommit).parents, [], '重置提交不应带父提交');
+
+  // 快照目录树被一并清掉，但数据本身完好
+  assert.deepEqual(await harness.store.snapshot.listSnapshots(), []);
+  assert.equal(await comment.count({}), 6, '重置不能丢数据');
+
+  const { model } = await harness.coldStart();
+
+  assert.equal(await model('Comment').count({}), 6);
+  assert.equal(await model('Comment').count({ url: '/a' }), 6);
+});
+
+test('重置仓库：keepSnapshots 可以留住快照', async (t) => {
+  const harness = await createHarness();
+
+  t.after(() => harness.dispose());
+
+  await harness.model('Comment').add(commentData({ url: '/a', comment: 'a' }));
+  await harness.store.queue.flush();
+  await harness.store.snapshot.createSnapshot('2026-09-24');
+
+  await harness.store.snapshot.resetRepository({ keepSnapshots: true });
+
+  assert.deepEqual(await harness.store.snapshot.listSnapshots(), ['2026-09-24']);
+  assert.equal(historyDepth(harness.mock), 1);
+});
+
+test('恢复的日期格式非法时直接报错', async (t) => {
+  const harness = await createHarness();
+
+  t.after(() => harness.dispose());
+
+  await assert.rejects(() => harness.store.snapshot.restore('../../etc'), /YYYY-MM-DD/u);
+  await assert.rejects(() => harness.store.snapshot.restore(''), /YYYY-MM-DD/u);
 });
 
 test('空仓库不产生空快照', async (t) => {

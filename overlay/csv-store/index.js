@@ -106,6 +106,7 @@ function createStore(config, { fetchImpl, logger = console } = {}) {
     logger,
     keepDays: config.snapshotKeepDays,
     snapshotHour: config.snapshotHour,
+    maxRetries: config.maxRetries,
   });
 
   return { config, logger, github, manager, cache, queue, snapshot };
@@ -216,8 +217,8 @@ function verifyHs256(token, secret) {
 
 /** 判断当前请求是否由管理员发起（与 Waline 的登录/权限语义一致）。 */
 async function isAdministrator(ctx, cache) {
-  const header = ctx.get('authorization') || '';
-  const token = header.replace(/^Bearer /iu, '') || ctx.query?.token;
+  // 只认 Authorization 头：token 出现在 URL 里会被代理日志、浏览器历史留下
+  const token = ctx.get('authorization').replace(/^Bearer /iu, '');
 
   if (!token) {
     return false;
@@ -242,8 +243,11 @@ async function isAdministrator(ctx, cache) {
 
 const ADMIN_ROUTE = /\/csv-store\/(?<action>[a-z]+)\/?$/u;
 
+/** 确认型操作必须显式传 confirm，避免一次误点/爬虫就清掉历史。 */
+const isConfirmed = (value) => ['1', 'true', 'yes'].includes(String(value ?? '').trim().toLowerCase());
+
 async function handleAdminRequest(ctx, action) {
-  const { cache, queue, snapshot, manager, logger } = getStore();
+  const { cache, queue, snapshot, manager, github, logger } = getStore();
 
   if (!(await isAdministrator(ctx, cache))) {
     ctx.status = 401;
@@ -301,6 +305,45 @@ async function handleAdminRequest(ctx, action) {
         ctx.body = { errno: 0, data: await queue.flush() };
 
         return;
+      case 'reset:POST': {
+        // 不可逆：丢弃全部历史提交，只保留当前数据（+ 可选保留快照）
+        const confirm = ctx.request.body?.confirm ?? ctx.query?.confirm;
+
+        if (!isConfirmed(confirm)) {
+          ctx.status = 400;
+          ctx.body = { errno: 1, errmsg: '重置会丢弃全部历史提交，请显式传 confirm=1' };
+
+          return;
+        }
+        await queue.flush();
+        ctx.body = {
+          errno: 0,
+          data: await snapshot.resetRepository({
+            keepSnapshots: isConfirmed(ctx.request.body?.keepSnapshots ?? ctx.query?.keepSnapshots),
+          }),
+        };
+
+        return;
+      }
+      case 'stats:GET': {
+        const tables = {};
+
+        for (const table of TABLES) {
+          tables[table] = cache.tables[table].shards.size;
+        }
+        ctx.body = {
+          errno: 0,
+          data: {
+            queue: queue.stats,
+            githubRequests: github.requestCount,
+            shards: tables,
+            pending: cache.pending.size,
+            lastRefresh: cache.lastRefresh,
+          },
+        };
+
+        return;
+      }
       default:
         ctx.status = 404;
         ctx.body = { errno: 1, errmsg: `不支持的运维操作：${action} ${ctx.method}` };

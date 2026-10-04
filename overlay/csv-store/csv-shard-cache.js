@@ -28,6 +28,32 @@ const TABLES = ['Comment', 'Users', 'Counter'];
 /** 空集合常量：避免在热路径里反复 new Set() 造成 GC 压力。 */
 const EMPTY_SET = new Set();
 
+/**
+ * 这些表的数值列改用"远端值 + 本地增量"合并，而不是"本地优先"。
+ *
+ * 原因：Counter 的阅读量是并发自增（Waline 传的是
+ * `(counter) => ({ time: counter.time + 1 })`）。两个实例基于同一个基线各加 1，
+ * 谁后提交谁覆盖——"本地优先"会让先提交的那个 +1 凭空消失，
+ * 表现就是阅读量涨得比实际少。
+ *
+ * 记下"本实例施加的增量"，合并时以远端值为基再加上增量，两个 +1 就都留下了。
+ * 评论表不存在这种语义（行是整行写入的），保持本地优先。
+ */
+const DELTA_MERGE_TABLES = new Set(['Counter']);
+
+/** CSV 里数字是字符串；空串必须算"非数字"，否则 Number('') === 0 会参与比较。 */
+const numericOf = (value) => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : Number.NaN;
+  }
+  if (typeof value !== 'string') {
+    return Number.NaN;
+  }
+  const text = value.trim();
+
+  return text === '' ? Number.NaN : Number(text);
+};
+
 // ---------------------------------------------------------------------------
 // 条件查询引擎（对齐 Waline / ThinkJS 的 where 子集语义）
 // ---------------------------------------------------------------------------
@@ -255,7 +281,7 @@ class CsvShardCache {
     this.ready = false;
     this.lastRefresh = 0;
     this.manifestSha = {};
-    /** path → { table, deleted: Set<objectId> }，存在即表示该分片待提交。 */
+    /** path → { table, deleted: Set<objectId>, deltas: Map<objectId, Map<field, number>>|null }，存在即表示该分片待提交。 */
     this.pending = new Map();
     /** path → { table, existed, sha, rows }：最后一次提交成功时的内容，用于失败回滚。 */
     this.baselines = new Map();
@@ -281,7 +307,7 @@ class CsvShardCache {
     let entry = this.pending.get(path);
 
     if (!entry) {
-      entry = { table, deleted: new Set() };
+      entry = { table, deleted: new Set(), deltas: null };
       this.pending.set(path, entry);
       // 第一次变脏时采基线：此刻分片内容仍是"上一次提交成功后的状态"
       this.captureBaseline(path, table);
@@ -419,7 +445,8 @@ class CsvShardCache {
    * 把远端分片内容并入本地。
    *
    * 合并规则（默认本地优先，因为本地是本实例对外的权威视图）：
-   *   1. 本地已存在的 objectId → 保留本地版本（含本实例尚未提交的修改）
+   *   1. 本地已存在的 objectId → 保留本地版本（含本实例尚未提交的修改）；
+   *      计数类表（Counter）例外：数值列按"远端值 + 本地增量"合并
    *   2. 本地已删除的 objectId → 尊重删除，不复活
    *   3. 其余远端行 → 追加（这些是别的实例写入、本实例还没见过的数据）
    *
@@ -444,19 +471,31 @@ class CsvShardCache {
     }
 
     const pending = this.pending.get(path);
-    const localIds = new Set(shard.rows.map((row) => row.objectId));
+    const localById = new Map(shard.rows.map((row) => [row.objectId ?? '', row]));
 
     for (const remote of remoteRows) {
       const objectId = remote.objectId ?? '';
 
-      if (!objectId || localIds.has(objectId)) {
+      if (!objectId) {
+        continue;
+      }
+      const local = localById.get(objectId);
+
+      if (local) {
+        // 同一行两边都有：默认保留本地版本（含本实例尚未提交的修改）；
+        // 计数类表改用"远端值 + 本地增量"，否则并发自增会静默丢一个 +1
+        if (DELTA_MERGE_TABLES.has(table)) {
+          this.applyRemoteDelta(local, remote, pending?.deltas?.get(objectId));
+        }
         continue;
       }
       if (pending?.deleted.has(objectId)) {
         continue;
       }
-      shard.rows.push(this.manager.normalizeRow(table, remote));
-      localIds.add(objectId);
+      const row = this.manager.normalizeRow(table, remote);
+
+      shard.rows.push(row);
+      localById.set(objectId, row);
     }
 
     shard.sha = sha;
@@ -634,7 +673,9 @@ class CsvShardCache {
         return;
       }
       if (!Array.isArray(condition)) {
-        intersect(lookup(String(condition)));
+        // 用 toCell 而不是 String()：条件值是 Date 时必须落成 ISO 字符串，
+        // 否则拿本地化时间去查桶，候选集为空、查询静默返回空结果
+        intersect(lookup(toCell(condition)));
 
         return;
       }
@@ -861,8 +902,12 @@ class CsvShardCache {
       return null;
     }
     const state = this.tables[table];
+    const pending = this.pendingEntry(entry.shardPath, table);
+    const trackDelta = DELTA_MERGE_TABLES.has(table);
+    const deltaFields = trackDelta ? Object.keys(patch ?? {}) : [];
+    // 增量必须在改动之前取值：我们要的是"本次更新施加了多少"，不是最终值
+    const before = trackDelta ? deltaFields.map((key) => entry.row[key]) : null;
 
-    this.pendingEntry(entry.shardPath, table);
     this.unindexRow(state, table, entry.row);
 
     for (const [key, value] of Object.entries(patch)) {
@@ -875,10 +920,63 @@ class CsvShardCache {
     }
     entry.row.updatedAt = new Date().toISOString();
 
+    if (trackDelta) {
+      deltaFields.forEach((key, index) => {
+        const from = numericOf(before[index]);
+        const to = numericOf(entry.row[key]);
+
+        if (Number.isFinite(from) && Number.isFinite(to) && from !== to) {
+          this.recordDelta(pending, objectId, key, to - from);
+        }
+      });
+    }
+
     state.byId.set(objectId, entry);
     this.indexRow(state, table, entry.row);
 
     return entry.row;
+  }
+
+  /** 累计某行某字段的增量：同一行的多次自增要相加，而不是互相覆盖。 */
+  recordDelta(pending, objectId, field, delta) {
+    if (!pending.deltas) {
+      pending.deltas = new Map();
+    }
+    let fields = pending.deltas.get(objectId);
+
+    if (!fields) {
+      fields = new Map();
+      pending.deltas.set(objectId, fields);
+    }
+    fields.set(field, (fields.get(field) ?? 0) + delta);
+  }
+
+  /**
+   * 用远端行刷新本地行的数值列：结果 = 远端值 + 本实例施加的增量。
+   *
+   * 没有增量时（纯读取刷新）等价于"远端优先"，这正是计数器该有的语义：
+   * 计数只会由增量推进，不存在"本地有个更权威的绝对值"。
+   */
+  applyRemoteDelta(localRow, remoteRow, deltas) {
+    for (const [key, value] of Object.entries(remoteRow)) {
+      if (key === 'objectId') {
+        continue;
+      }
+      const remoteNumber = numericOf(value);
+
+      if (!Number.isFinite(remoteNumber)) {
+        continue;
+      }
+      localRow[key] = toCell(remoteNumber + (deltas?.get(key) ?? 0));
+    }
+
+    // 非数值列（url 等）保持本地优先；时间戳取较新的那个，方便排障
+    if (
+      remoteRow.updatedAt &&
+      (!localRow.updatedAt || compareValues(remoteRow.updatedAt, localRow.updatedAt) > 0)
+    ) {
+      localRow.updatedAt = toCell(remoteRow.updatedAt);
+    }
   }
 
   /** 删除一行。返回其所在分片路径。 */

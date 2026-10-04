@@ -52,12 +52,14 @@ data/                             # 数据根目录（CSV_STORE_DIR，默认 dat
 │   ├── 3f/
 │   │   └── 3f9c.csv
 │   └── _manifest.csv
-└── _snapshots/                   # 每日快照
-    └── 2026-09-25/
-        ├── comments/…
-        ├── users/…
-        └── counters/…
+└── _snapshots/                   # 每日快照：一天一个清单文件（path,sha）
+    └── 2026-09-25.csv
 ```
+
+> 快照**不是**数据的第二份拷贝，而是一份"路径 → blob SHA"的清单（一天一个文件）。
+> 恢复时按清单把当年的 tree 重建出来，与"整目录复制"完全等价，
+> 但仓库文件数不再随 `分片数 × 保留天数` 放大——旧做法会逼近 Git Trees API 的
+> 文件数上限，一旦被截断，快照/恢复/rebuild 会一起失效。
 
 ### 分片规则（稳定可预测，只由 key 决定）
 
@@ -156,7 +158,7 @@ Git 提交中落地，因此不会出现两者不一致的中间态。
 
 ```bash
 npm install
-npm test          # 43 个用例：单元 + 集成 + 真实 Waline 运行时端到端 + 内存预算
+npm test          # 53 个用例：单元 + 集成 + 真实 Waline 运行时端到端 + 并发/限流可靠性 + 内存预算
 npm run benchmark # 生成 overlay/benchmark/REPORT.md
 ```
 
@@ -175,6 +177,8 @@ npm run benchmark # 生成 overlay/benchmark/REPORT.md
 | `POST` | `/csv-store/compact` | 把行数回落的分片族压缩回基础分片 |
 | `POST` | `/csv-store/rebuild` | 以仓库真实文件为准核对分片并修正 manifest（人工改过仓库后使用） |
 | `POST` | `/csv-store/flush` | 手动把内存中待提交的变更落盘 |
+| `GET` | `/csv-store/stats` | 运行指标：提交/冲突/重试/回滚次数、GitHub 请求数、各表分片数、待提交数 |
+| `POST` | `/csv-store/reset` | **不可逆**：丢弃全部历史提交，只保留当前数据（需显式 `confirm=1`） |
 
 示例：
 
@@ -182,7 +186,12 @@ npm run benchmark # 生成 overlay/benchmark/REPORT.md
 TOKEN=<登录后在浏览器里拿到的 token>
 curl -X POST https://<站点>/api/csv-store/snapshot -H "Authorization: Bearer $TOKEN"
 curl -X POST "https://<站点>/api/csv-store/restore?date=2026-09-25" -H "Authorization: Bearer $TOKEN"
+curl https://<站点>/api/csv-store/stats -H "Authorization: Bearer $TOKEN"
+# 仓库瘦身：丢弃历史提交（confirm 必填，快照默认一并丢弃，加 keepSnapshots=1 可保留）
+curl -X POST "https://<站点>/api/csv-store/reset?confirm=1" -H "Authorization: Bearer $TOKEN"
 ```
+
+`restore` 的 `date` 必须是 `YYYY-MM-DD`，非法值直接报错（不会拿它去拼路径）。
 
 ### 每日快照
 
@@ -196,8 +205,21 @@ curl -X POST "https://<站点>/api/csv-store/restore?date=2026-09-25" -H "Author
 
 - **推荐**：`POST /csv-store/restore`，用某个日期的快照整体覆盖 `data/`
   （同时删除快照之后多出来的文件，恢复后状态与该快照完全一致）。
-- **手工**：直接在 GitHub 上把 `_snapshots/<date>/` 下的文件复制回原路径也能恢复；
-  数据本身就在 git 里，任何历史版本都可以通过 git 找回。
+- **手工**：快照清单 `_snapshots/<date>.csv` 就是一份 `path,sha` 列表，
+  照它把对应 blob 放回原路径即可；数据本身就在 git 里。
+
+### 仓库瘦身：`POST /csv-store/reset`
+
+写入即提交，所以历史里堆着**每一次分片重写产生的 blob**：仓库体积只增不减，
+时间久了会逼近 GitHub 的仓库体积建议值。而评论数据的历史提交没有价值——
+任何时点都能用快照恢复。因此提供重置：
+
+- 用当前 `data/` 下的文件构造一个**没有父提交**的 commit，并强制更新分支指针；
+- 仓库回到"一个提交"的状态，`.git` 体积随之降到当前数据大小；
+- 快照目录（同样只是历史负担）默认一并丢弃，需要保留就传 `keepSnapshots=1`；
+- 比"新建仓库再切环境变量"更直接：没有两份数据并存的切换窗口，也不需要改配置。
+
+操作前建议先 `POST /csv-store/snapshot` 拍一张，确认无误再 reset。
 
 ---
 
@@ -210,6 +232,8 @@ curl -X POST "https://<站点>/api/csv-store/restore?date=2026-09-25" -H "Author
 | 页面读到的评论变少了 | 内存缓存尚未过期（默认 60s），其他实例刚写入 | 等一个 `CSV_CACHE_TTL` 周期；或调小该值 |
 | 有人直接在 GitHub 上改了 CSV，前台没变 | 读路径只信任 manifest 记录的 SHA | 调 `POST /csv-store/rebuild` 核对并同步 |
 | `Git Trees API 返回被截断` | 仓库文件数超过 10 万，无法安全做快照 | 拆分仓库，或调大 `SHARD_HASH_LEN` 之外的粒度设置 |
+| 数据仓库体积持续增大 | 每次写入都会重写整个分片并产生新 blob，历史只增不减 | `POST /csv-store/reset` 丢弃历史提交；或调小 `SHARD_MAX_ROWS` 降低单次提交体积 |
+| 阅读量比实际访问少 | 多实例并发自增时发生（已在存储层用"远端值 + 本地增量"合并修掉） | 确认部署的是修复后的版本；极端并发仍可能少计 1~2 次，计数类数据本就不要求精确 |
 | 分片文件太多 | 文章数很多，一片一族是设计使然 | 调小 `SHARD_HASH_LEN` 会把同一目录下的文章合并到更少的分片 |
 
 ### 写入可靠性设计（为什么不会丢评论）
@@ -224,7 +248,9 @@ curl -X POST "https://<站点>/api/csv-store/restore?date=2026-09-25" -H "Author
 4. **乐观锁**：读取顺序固定为"先读 head、再读数据"，提交时 `force=false` 更新 ref。
    只要在读取数据之后有人提交过，我们的非快进更新就会被 GitHub 拒绝。
 5. **冲突合并**：被拒后重新拉取 manifest，只下载 SHA 变化的分片，按"本地优先 +
-   尊重本实例删除"的规则合并，再重试（最多 `MAX_RETRIES` 次）。
+   尊重本实例删除"的规则合并，再重试（最多 `MAX_RETRIES` 次，带退避）。
+   计数类表（`Counter`）例外：数值列按"远端值 + 本实例增量"合并，
+   否则两个实例各加一次的阅读量会被后提交者覆盖掉一个。
 6. **失败回滚**：重试耗尽后把内存恢复到"最后一次提交成功"的状态并丢弃待提交标记，
    让进程内状态与远端重新一致，同时把错误抛给调用方。
 7. **幂等去重**：`mail + url + 内容哈希` 相同且落在 `DEDUP_WINDOW_SECONDS` 内的提交

@@ -103,33 +103,70 @@ class ShardWriteQueue {
     }
   }
 
-  /** 并发调用只执行一次真正的刷盘。 */
+  /**
+   * 落盘。并发调用共享同一次提交，但**必须**保证"调用方自己的变更"也被涵盖。
+   *
+   * 为什么不能直接 `return this.flushing`：在途的那一次提交已经在
+   * `commitOnce` 里取过 pending 快照了。如果我们的变更是在它取完快照之后才
+   * 进来的，这次提交不会包含它——直接返回在途 promise 就会让请求带着
+   * "响应 200 但其实没落盘"结束，实例一冻结数据就丢了（serverless 下这是
+   * 常态）。所以在途提交结束后要再看一眼，只要还有待提交的分片就补一轮。
+   *
+   * `runFlush` 每轮都会清空自己的 pending，因此这个循环一定会结束；
+   * guard 只是防御性上限。
+   */
   async flush() {
     if (!this.cache.isDirty()) {
       return { skipped: true, shards: 0 };
     }
-    if (this.flushing) {
-      return this.flushing;
+
+    const committed = { skipped: false, shards: 0, retries: 0 };
+    let guard = 0;
+
+    while (this.cache.isDirty()) {
+      if (guard >= 32) {
+        this.logger.warn?.('[shard-write-queue] flush 连续多轮仍未清空待提交分片，提前结束');
+        break;
+      }
+      guard += 1;
+
+      if (this.flushing) {
+        await this.flushing;
+        continue;
+      }
+
+      this.flushing = this.runFlush().finally(() => {
+        this.flushing = null;
+      });
+      const batch = await this.flushing;
+
+      committed.shards += batch.shards;
+      committed.retries += batch.retries;
     }
 
-    this.flushing = this.runFlush().finally(() => {
-      this.flushing = null;
-    });
-
-    return this.flushing;
+    return committed;
   }
 
   async runFlush() {
     const committed = { skipped: false, shards: 0, retries: 0 };
+    let guard = 0;
 
     // 分片数超过 maxBatch 时分多轮提交，避免单次提交过大
     while (this.cache.isDirty()) {
+      if (guard >= 1024) {
+        break;
+      }
+      guard += 1;
+
       const paths = [...this.cache.pending.keys()].slice(0, this.maxBatch);
+      const result = await this.commitPaths(paths);
 
-      await this.commitPaths(paths);
-      committed.shards += paths.length;
+      committed.shards += result.shards;
+      committed.retries += result.retries;
 
-      if (this.cache.pending.size === 0) {
+      // 本轮一个分片都没提交（例如它们的 pending 已被并发提交清掉）就停手，
+      // 避免在异常状态下空转
+      if (result.shards === 0) {
         break;
       }
     }
@@ -155,6 +192,7 @@ class ShardWriteQueue {
       ...new Set(paths.map((path) => this.cache.pending.get(path)?.table).filter(Boolean)),
     ];
     let lastError;
+    let retries = 0;
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt += 1) {
       try {
@@ -162,9 +200,10 @@ class ShardWriteQueue {
 
         await this.cache.refresh({ force: true, tables: touchedTables });
 
-        return await this.commitOnce(touchedTables, head);
+        return { ...(await this.commitOnce(paths, touchedTables, head)), retries };
       } catch (err) {
         lastError = err;
+        retries += 1;
 
         if (err instanceof ShaConflictError) {
           this.stats.conflicts += 1;
@@ -174,6 +213,10 @@ class ShardWriteQueue {
           );
           // 冲突时不需要回滚：下一轮的 refresh 会把远端新数据合并进来，
           // 本地未提交的变更仍在内存里，合并规则保证本地版本优先。
+          // 退避是必须的——冲突意味着真的有别的实例在写，立刻重试只会互相挤。
+          if (attempt < this.maxRetries) {
+            await sleep(300 * 2 ** (attempt - 1) + Math.floor(Math.random() * 150));
+          }
           continue;
         }
 
@@ -199,12 +242,28 @@ class ShardWriteQueue {
     );
   }
 
-  async commitOnce(touchedTables, head) {
+  /**
+   * 提交本轮指定的分片（而不是"所有待提交的分片"）。
+   *
+   * 按批次提交是 MAX_BATCH_SIZE 的全部意义：单次 tree 太大既慢又容易撞上限。
+   * 之前这里遍历的是整个 pending，于是分批形同虚设，而且批次外的分片被提交了、
+   * 它所属表的 manifest 却不在 touchedTables 里 —— 仓库里就会留下
+   * "分片内容与 manifest 记录不一致"的中间态。
+   *
+   * manifest 仍然为 touchedTables 里的每张表整体重建（manifest 是整表的投影），
+   * 这样"分片与 manifest 同一次提交"的原子性不变。
+   */
+  async commitOnce(paths, touchedTables, head) {
     const upserts = new Map();
     const shardShas = new Map();
     const deletes = [];
 
-    for (const [path, entry] of this.cache.pending) {
+    for (const path of paths) {
+      const entry = this.cache.pending.get(path);
+
+      if (!entry) {
+        continue;
+      }
       const shard = this.cache.tables[entry.table].shards.get(path);
       const rows = shard ? shard.rows : [];
 

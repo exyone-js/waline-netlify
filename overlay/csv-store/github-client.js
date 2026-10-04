@@ -64,7 +64,53 @@ class RepoNotAccessibleError extends GithubApiError {
   }
 }
 
+/**
+ * 是否值得重试。
+ *
+ * 除了 429/5xx，还要覆盖 GitHub 的"次级限流"：它返回的是 **403**（不是 429），
+ * 文案里带 rate limit / abuse detection。不认这个的话，一次限流就会被当成
+ * "token 没权限"直接抛给业务，表现为莫名其妙的 500。
+ */
+const RATE_LIMIT_MESSAGE = /rate limit|abuse detection|secondary rate/iu;
+
 const isRetryableStatus = (status) => status === 429 || status >= 500;
+
+const isRetryable = (status, body) =>
+  isRetryableStatus(status) || (status === 403 && RATE_LIMIT_MESSAGE.test(String(body?.message ?? '')));
+
+/** 解析 Retry-After：既支持"秒数"也支持 HTTP 日期。 */
+const parseRetryAfter = (value) => {
+  if (!value) {
+    return null;
+  }
+  const seconds = Number.parseInt(String(value).trim(), 10);
+
+  if (Number.isFinite(seconds)) {
+    return Math.max(seconds, 0) * 1000;
+  }
+  const when = Date.parse(String(value));
+
+  return Number.isNaN(when) ? null : Math.max(when - Date.now(), 0);
+};
+
+/** 限并发地执行：blob 上传是最容易被串行化拖慢的一步（N 个分片 = N 次往返）。 */
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+
+  const runners = Array.from({ length: Math.min(Math.max(limit, 1), items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+
+  await Promise.all(runners);
+
+  return results;
+}
 
 class GithubClient {
   constructor({
@@ -76,6 +122,7 @@ class GithubClient {
     logger = console,
     maxRetries = 2,
     timeoutMs = 20000,
+    blobConcurrency = 8,
   } = {}) {
     if (!token) {
       throw new Error('GITHUB_TOKEN 未配置，无法读写 GitHub 仓库');
@@ -97,6 +144,7 @@ class GithubClient {
     this.logger = logger;
     this.maxRetries = maxRetries;
     this.timeoutMs = timeoutMs;
+    this.blobConcurrency = blobConcurrency;
     this.requestCount = 0;
   }
 
@@ -123,9 +171,11 @@ class GithubClient {
     };
 
     let lastError;
+    let retryAfterMs = null;
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       this.requestCount += 1;
+      retryAfterMs = null;
 
       try {
         const res = await this.fetchImpl(url, {
@@ -133,7 +183,15 @@ class GithubClient {
           signal: AbortSignal.timeout(this.timeoutMs),
         });
         const text = await res.text();
-        const data = text ? JSON.parse(text) : {};
+        // GitHub 偶尔会返回非 JSON（网关错误页）；别让 JSON.parse 把
+        // "可以重试的 502" 变成 "看不懂的 SyntaxError"
+        let data = {};
+
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          data = { message: text ? text.slice(0, 200) : res.statusText };
+        }
 
         if (res.ok) {
           return data;
@@ -141,20 +199,24 @@ class GithubClient {
         if (res.status === 404 && allow404) {
           return null;
         }
-        if (!isRetryableStatus(res.status)) {
+        if (!isRetryable(res.status, data)) {
           throw new GithubApiError(res.status, data?.message || res.statusText, data);
         }
 
+        // 限流时 GitHub 会用 Retry-After 明确告诉我们等多久，比自己猜准得多
+        retryAfterMs = parseRetryAfter(res.headers?.get?.('retry-after'));
         lastError = new GithubApiError(res.status, data?.message || res.statusText, data);
       } catch (err) {
-        if (err instanceof GithubApiError && !isRetryableStatus(err.status)) {
+        if (err instanceof GithubApiError && !isRetryable(err.status, err.body)) {
           throw err;
         }
         lastError = err;
       }
 
       if (attempt < this.maxRetries) {
-        const backoff = 500 * 2 ** attempt;
+        // 抖动是为了避免多个实例在同一秒一起重试，把限流窗口越挤越大
+        const backoff = retryAfterMs ?? 500 * 2 ** attempt + Math.floor(Math.random() * 150);
+
         this.logger.warn?.(
           `[github] ${method} ${path} 第 ${attempt + 1} 次失败（${lastError.message}），${backoff}ms 后重试`,
         );
@@ -280,24 +342,41 @@ class GithubClient {
    * head 之后任何人再提交，我们的非快进更新都会被 GitHub 拒绝。
    *
    * 不传 head 时才在本函数内读取（仅供快照等自读自写的场景使用）。
+   *
+   * @param {boolean} [options.orphan] 提交不带父提交、不继承 base_tree：
+   *   提交后仓库里只剩本次写入的文件，历史整体丢弃（用于"重置仓库"运维操作）。
+   * @param {boolean} [options.force] 强制更新分支指针（非快进也接受），
+   *   只在 orphan 这类有意重写历史的场景使用；日常写入必须为 false，
+   *   否则乐观锁就失效了。
    */
-  async commitChanges({ message, upserts = new Map(), deletes = [], head }) {
+  async commitChanges({ message, upserts = new Map(), deletes = [], head, force = false, orphan = false }) {
     const resolvedHead = head === undefined ? await this.getBranchHead() : head;
 
     if (upserts.size === 0 && [...deletes].length === 0) {
       return { headSha: resolvedHead?.headSha ?? null, uploaded: 0 };
     }
 
-    const tree = [];
-    let uploaded = 0;
+    const baseTree = orphan ? null : resolvedHead?.treeSha ?? null;
+    const uploads = [];
+    const shaOf = new Map();
 
     for (const [filePath, value] of upserts) {
-      const sha = typeof value === 'string' ? await this.createBlob(value) : value.sha;
-
       if (typeof value === 'string') {
-        uploaded += 1;
+        uploads.push([filePath, value]);
+      } else {
+        shaOf.set(filePath, value.sha);
       }
-      tree.push({ path: filePath, mode: '100644', type: 'blob', sha });
+    }
+
+    // 并发上传：一个分片一个 blob，串行的话 N 个分片就是 N 次串行往返
+    await mapLimit(uploads, this.blobConcurrency, async ([filePath, content]) => {
+      shaOf.set(filePath, await this.createBlob(content));
+    });
+
+    const tree = [];
+
+    for (const [filePath] of upserts) {
+      tree.push({ path: filePath, mode: '100644', type: 'blob', sha: shaOf.get(filePath) });
     }
     for (const filePath of deletes) {
       // Git Data API 用 sha: null 表示删除该路径
@@ -305,26 +384,26 @@ class GithubClient {
     }
 
     const treeData = await this.request('POST', '/git/trees', {
-      body: { ...(resolvedHead ? { base_tree: resolvedHead.treeSha } : {}), tree },
+      body: { ...(baseTree ? { base_tree: baseTree } : {}), tree },
     });
     const commitData = await this.request('POST', '/git/commits', {
       body: {
         message,
         tree: treeData.sha,
-        parents: resolvedHead ? [resolvedHead.headSha] : [],
+        parents: orphan || !resolvedHead ? [] : [resolvedHead.headSha],
       },
     });
 
-    await this.updateRef(commitData.sha, resolvedHead?.headSha ?? null);
+    await this.updateRef(commitData.sha, resolvedHead?.headSha ?? null, { force });
 
-    return { headSha: commitData.sha, uploaded };
+    return { headSha: commitData.sha, uploaded: uploads.length };
   }
 
   /**
    * 更新分支指针。force=false 是关键：若分支在我们读 head 之后被推进，
    * GitHub 会以 422 拒绝这次非快进更新，冲突因此不会被静默覆盖。
    */
-  async updateRef(commitSha, previousHeadSha) {
+  async updateRef(commitSha, previousHeadSha, { force = false } = {}) {
     if (previousHeadSha === null) {
       try {
         await this.request('POST', '/git/refs', {
@@ -343,7 +422,7 @@ class GithubClient {
 
     try {
       await this.request('PATCH', `/git/refs/heads/${encodeURIComponent(this.branch)}`, {
-        body: { sha: commitSha, force: false },
+        body: { sha: commitSha, force },
       });
     } catch (err) {
       if (err instanceof GithubApiError && (err.status === 422 || err.status === 409)) {
