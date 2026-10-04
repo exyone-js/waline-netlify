@@ -4,38 +4,38 @@
     "shardCount": 20,
     "legacyFileBytes": 354336,
     "coldStart": {
-      "elapsed": 175.6541,
-      "calls": 23,
-      "bytes": 481037
+      "elapsed": 82.2518,
+      "calls": 4,
+      "bytes": 26970
     },
     "new": {
-      "p50": 0.164,
-      "p95": 0.5337,
+      "p50": 0.2245,
+      "p95": 0.339,
       "calls": 0,
       "bytes": 0,
       "page": {
-        "elapsed": 0.5626,
+        "elapsed": 0.8391,
         "calls": 0,
         "bytes": 0
       },
       "write": {
         "calls": 7,
         "bytes": 3421,
-        "requestBytes": 27451
+        "requestBytes": 27449
       },
       "burst": {
         "calls": 7,
         "bytes": 3421,
-        "requestBytes": 44759
+        "requestBytes": 44761
       }
     },
     "legacy": {
-      "p50": 24.3636,
-      "p95": 28.4928,
+      "p50": 24.5504,
+      "p95": 27.704,
       "calls": 1,
       "bytes": 472592,
       "page": {
-        "elapsed": 111.6388,
+        "elapsed": 97.5064,
         "calls": 4,
         "bytes": 1890368
       },
@@ -47,7 +47,7 @@
       "burst": {
         "calls": 100,
         "bytes": 47259200,
-        "requestBytes": 23645226
+        "requestBytes": 23645238
       }
     }
   },
@@ -56,38 +56,38 @@
     "shardCount": 100,
     "legacyFileBytes": 1777296,
     "coldStart": {
-      "elapsed": 241.4403,
-      "calls": 103,
-      "bytes": 2412214
+      "elapsed": 9.2578,
+      "calls": 4,
+      "bytes": 38707
     },
     "new": {
-      "p50": 0.0637,
-      "p95": 0.1229,
+      "p50": 0.1984,
+      "p95": 0.367,
       "calls": 0,
       "bytes": 0,
       "page": {
-        "elapsed": 0.2147,
+        "elapsed": 0.6809,
         "calls": 0,
         "bytes": 0
       },
       "write": {
         "calls": 7,
         "bytes": 15158,
-        "requestBytes": 39187
+        "requestBytes": 39185
       },
       "burst": {
         "calls": 7,
         "bytes": 15158,
-        "requestBytes": 56491
+        "requestBytes": 56481
       }
     },
     "legacy": {
-      "p50": 119.4074,
-      "p95": 135.4544,
+      "p50": 107.9563,
+      "p95": 129.9237,
       "calls": 2,
       "bytes": 2369969,
       "page": {
-        "elapsed": 492.2474,
+        "elapsed": 442.2907,
         "calls": 8,
         "bytes": 9479876
       },
@@ -99,7 +99,7 @@
       "burst": {
         "calls": 150,
         "bytes": 118505600,
-        "requestBytes": 118509234
+        "requestBytes": 118509242
       }
     }
   },
@@ -108,38 +108,38 @@
     "shardCount": 200,
     "legacyFileBytes": 3570996,
     "coldStart": {
-      "elapsed": 414.3589,
-      "calls": 203,
-      "bytes": 4846446
+      "elapsed": 10.6138,
+      "calls": 4,
+      "bytes": 53639
     },
     "new": {
-      "p50": 0.0595,
-      "p95": 0.1203,
+      "p50": 0.0754,
+      "p95": 0.1413,
       "calls": 0,
       "bytes": 0,
       "page": {
-        "elapsed": 0.3203,
+        "elapsed": 0.2248,
         "calls": 0,
         "bytes": 0
       },
       "write": {
         "calls": 7,
         "bytes": 30090,
-        "requestBytes": 54119
+        "requestBytes": 54117
       },
       "burst": {
         "calls": 7,
         "bytes": 30090,
-        "requestBytes": 71419
+        "requestBytes": 71425
       }
     },
     "legacy": {
-      "p50": 232.7128,
-      "p95": 265.9435,
+      "p50": 227.2505,
+      "p95": 248.7884,
       "calls": 2,
       "bytes": 4761569,
       "page": {
-        "elapsed": 960.5429,
+        "elapsed": 861.0156,
         "calls": 8,
         "bytes": 19046276
       },
@@ -151,7 +151,7 @@
       "burst": {
         "calls": 150,
         "bytes": 238085600,
-        "requestBytes": 238089250
+        "requestBytes": 238089238
       }
     }
   },
@@ -160,38 +160,38 @@
     "shardCount": 990,
     "legacyFileBytes": 17920596,
     "coldStart": {
-      "elapsed": 2229.4688,
-      "calls": 993,
-      "bytes": 24316065
+      "elapsed": 75.789,
+      "calls": 4,
+      "bytes": 171628
     },
     "new": {
-      "p50": 0.0784,
-      "p95": 0.1408,
+      "p50": 0.1997,
+      "p95": 0.6489,
       "calls": 0,
       "bytes": 0,
       "page": {
-        "elapsed": 0.4255,
+        "elapsed": 1.7607,
         "calls": 0,
         "bytes": 0
       },
       "write": {
         "calls": 7,
         "bytes": 148079,
-        "requestBytes": 172107
+        "requestBytes": 172105
       },
       "burst": {
         "calls": 7,
         "bytes": 148079,
-        "requestBytes": 189407
+        "requestBytes": 189405
       }
     },
     "legacy": {
-      "p50": 1250.9794,
-      "p95": 1409.0505,
+      "p50": 1141.9326,
+      "p95": 1524.1274,
       "calls": 2,
       "bytes": 23894371,
       "page": {
-        "elapsed": 5244.3871,
+        "elapsed": 4547.8728,
         "calls": 8,
         "bytes": 95577484
       },
@@ -203,7 +203,7 @@
       "burst": {
         "calls": 150,
         "bytes": 1194725750,
-        "requestBytes": 1194729242
+        "requestBytes": 1194729238
       }
     }
   }

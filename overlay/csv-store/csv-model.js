@@ -46,6 +46,13 @@ class CsvModel {
     return this.cache.count(this.tableName, where, options);
   }
 
+  /** 取一行。Users 可按主键定位分片族，其它表需要整表加载。 */
+  async get(objectId) {
+    await this.cache.ensureFresh();
+
+    return this.cache.getRow(this.tableName, objectId);
+  }
+
   /**
    * 新增一行。
    *
@@ -56,7 +63,7 @@ class CsvModel {
   async add(data = {}) {
     await this.cache.ensureFresh();
 
-    const duplicate = this.findRecentDuplicate(data);
+    const duplicate = await this.findRecentDuplicate(data);
 
     if (duplicate) {
       // 幂等：短时间内重复提交同样内容（例如刷新页面重发）直接返回既有记录
@@ -70,7 +77,7 @@ class CsvModel {
       { defaults: true },
     );
 
-    this.queue.enqueue({ type: 'add', table: this.tableName, row });
+    await this.queue.enqueue({ type: 'add', table: this.tableName, row });
 
     return { ...row };
   }
@@ -85,7 +92,7 @@ class CsvModel {
   async update(data, where) {
     await this.cache.ensureFresh();
 
-    const rows = this.cache.filterRows(this.tableName, where);
+    const rows = await this.cache.filterRows(this.tableName, where);
     const updated = [];
 
     for (const row of rows) {
@@ -112,8 +119,8 @@ class CsvModel {
     await this.cache.ensureFresh();
 
     // filterRows 返回的是新数组，因此循环中从分片里摘除元素不会影响遍历
-    for (const row of this.cache.filterRows(this.tableName, where)) {
-      this.queue.enqueue({ type: 'delete', table: this.tableName, objectId: row.objectId });
+    for (const row of await this.cache.filterRows(this.tableName, where)) {
+      await this.queue.enqueue({ type: 'delete', table: this.tableName, objectId: row.objectId });
     }
   }
 
@@ -127,7 +134,7 @@ class CsvModel {
    * 后者在 10 万条评论下要吃掉 20MB 以上的常驻内存，而这段逻辑一天也跑不了几次。
    * 时间无法解析时不拦截——宁可多一条重复评论，也不要误杀正常评论。
    */
-  findRecentDuplicate(data) {
+  async findRecentDuplicate(data) {
     if (this.tableName !== 'Comment' || this.dedupWindowSeconds <= 0) {
       return null;
     }
@@ -139,7 +146,7 @@ class CsvModel {
     }
     const cutoff = Date.now() - this.dedupWindowSeconds * 1000;
 
-    for (const row of this.cache.filterRows('Comment', { url: data.url ?? '' })) {
+    for (const row of await this.cache.filterRows('Comment', { url: data.url ?? '' })) {
       if (this.cache.dedupHash(row) !== hash) {
         continue;
       }

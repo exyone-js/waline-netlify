@@ -109,6 +109,46 @@ test('MAX_BATCH_SIZE 真正分批，且每张表的 manifest 都与分片内容�
   assert.equal(await model('Counter').count({}), 1);
 });
 
+test('只加载了部分分片就提交，manifest 仍包含全部分片', async (t) => {
+  const harness = await createHarness();
+
+  t.after(() => harness.dispose());
+
+  const comment = harness.model('Comment');
+
+  for (let index = 0; index < 4; index += 1) {
+    await comment.add(commentData({ url: `/p${index}`, comment: `c-${index}` }));
+  }
+  await harness.store.queue.flush();
+
+  const before = harness.store.manager.parseManifest(harness.mock.readText('data/comments/_manifest.csv'));
+
+  assert.equal(before.size, 4);
+
+  // 冷启动后只查 /p0（只加载一个族），然后往 /p3 写一条并提交
+  const { store, model } = await harness.coldStart();
+
+  await model('Comment').select({ url: '/p0' });
+  await model('Comment').add(commentData({ url: '/p3', comment: 'late' }));
+  await store.queue.flush();
+  store.queue.stop();
+
+  // 关键点：manifest 是"权威清单"的投影，不能因为分片没加载就被漏掉
+  const after = harness.store.manager.parseManifest(harness.mock.readText('data/comments/_manifest.csv'));
+
+  assert.equal(after.size, 4, '未加载的分片也必须留在 manifest 里');
+
+  for (const [path, entry] of after) {
+    assert.equal(entry.sha, gitBlobSha(harness.mock.readText(path)), `${path} 的 sha 必须与实际内容一致`);
+  }
+
+  const { model: fresh } = await harness.coldStart();
+
+  assert.equal(await fresh('Comment').count({}), 5, '全部评论都必须还在');
+  assert.equal(await fresh('Comment').count({ url: '/p3' }), 2);
+  assert.equal(await fresh('Comment').count({ url: '/p1' }), 1);
+});
+
 test('两个实例并发自增阅读量：两次 +1 都留下', async (t) => {
   const harness = await createHarness();
 

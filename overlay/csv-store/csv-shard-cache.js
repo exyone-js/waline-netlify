@@ -8,17 +8,31 @@
  *   旧：select() → Contents API 下载 Comment.csv（可能几 MB）→ 解析 → O(n) 过滤
  *   新：select() → 读内存索引筛出候选 ID → 只对候选行做条件匹配与排序
  *
- * 数据仍然全部驻留内存（分片按需加载，且只在远端 SHA 变化时重新下载），
- * 这样"查询"退化成纯内存操作，既不消耗 GitHub 配额也没有网络延迟。
- * 100k 条评论的行对象 + 索引实测远低于 100MB 的内存预算。
+ * ---------------------------------------------------------------------------
+ * 两层状态：清单（权威）与内容（按需加载）
+ * ---------------------------------------------------------------------------
+ *   entries  Map<path, {sha,rowCount,…}>   manifest 里的全量分片清单，权威
+ *   shards   Map<path, {sha, rows}>        真正加载进内存的分片内容
+ *   loadedFamilies / allLoaded             记录"哪些族已经加载过"
+ *
+ * 分片族（family）由分片 key 唯一决定：
+ *   Comment/Counter：sha1(url)     → 一篇文章一个族
+ *   Users          ：objectId 前缀  → 一个前缀一个族
+ * 因此"按 url 查评论"这类查询可以先算出目标族，只加载这一个族的分片，
+ * 而不用把整个数据集读进内存。冷启动从"下载全部分片"降为"下载命中族"。
+ *
+ * 只有带 url / objectId 这类能定位到族的条件才能缩小加载范围；
+ * 无法定位时（后台列表、模糊搜索、按 pid/rid 删评论）退化为全量加载——
+ * 宁可多读，也不能在没加载全的情况下给出不完整的结果。
  *
  * 索引与"行"的关系：
- *   shards: Map<path, { sha, rows: [] }>   分片 → 行数组（真实数据）
  *   byId:   Map<objectId, { shardPath, row }>          主键直达，O(1)
  *   byField: Map<字段, Map<值, Set<objectId>>>         等值/IN 查询的候选集
  *
  * 注意 byId 存的是"行对象引用"而不是行号：行号在删除、合并之后会立刻失效，
  * 引用则始终指向当前对象，省掉一整类"索引指向错行"的隐蔽 bug。
+ * 索引是增量维护的（分片级 unindex/index），只有 compact / 回滚这类
+ * 整表重写才做一次全量重建。
  */
 
 const { sha1, toCell, DATE_FIELDS } = require('./shard-manager');
@@ -294,11 +308,18 @@ class CsvShardCache {
 
   static emptyTable() {
     return {
+      /** 权威清单：manifest 里的全部分片（无论是否已加载内容） */
+      entries: new Map(),
+      /** 已加载内容的分片 */
       shards: new Map(),
       byId: new Map(),
       byField: new Map(),
-      /** 分片族前缀 → 分片路径集合，用于把"新增记录的落点选择"从 O(全表分片) 降到 O(族内分片) */
+      /** 族前缀 → 分片路径集合（entries 的投影，供"新增记录的落点选择"使用） */
       families: new Map(),
+      /** 已整体加载过的族 */
+      loadedFamilies: new Set(),
+      /** 是否已加载该表的全部分片 */
+      allLoaded: false,
     };
   }
 
@@ -326,13 +347,15 @@ class CsvShardCache {
     if (this.baselines.has(path)) {
       return;
     }
-    const shard = this.tables[table].shards.get(path);
+    const state = this.tables[table];
+    const shard = state.shards.get(path);
+    const meta = state.entries.get(path);
 
     this.baselines.set(path, {
       table,
       // sha 非空表示这个分片在远端真实存在过；为空表示本次请求刚创建
-      existed: Boolean(shard?.sha),
-      sha: shard?.sha ?? null,
+      existed: Boolean(meta?.sha ?? shard?.sha),
+      sha: shard?.sha ?? meta?.sha ?? null,
       rows: shard ? shard.rows.map((row) => ({ ...row })) : [],
     });
   }
@@ -342,7 +365,7 @@ class CsvShardCache {
   }
 
   // --------------------------------------------------------------------------
-  // 加载与刷新
+  // 加载：清单刷新 + 按族按需加载
   // --------------------------------------------------------------------------
 
   async ensureFresh(maxAgeMs = this.cacheTtl) {
@@ -389,118 +412,222 @@ class CsvShardCache {
     this.lastRefresh = Date.now();
   }
 
-  /** 让某张表的内存状态与 manifest 对齐：下载变化的分片、丢弃已删除的分片。 */
+  /** 让某张表的内存状态与 manifest 对齐：更新清单、重新下载"已加载范围内"变化的分片。 */
   async syncTable(table, entries, { preferRemote = false } = {}) {
     const state = this.tables[table];
+    const next = new Map(entries);
+
+    // 本地新建、尚未提交的分片不在远端 manifest 里，必须补进权威清单，
+    // 否则下一次重建 manifest 会把它漏掉（文件在仓库里却读不到）
+    for (const [path, pending] of this.pending) {
+      if (pending.table !== table || next.has(path)) {
+        continue;
+      }
+      const shard = state.shards.get(path);
+
+      if (shard && shard.rows.length > 0) {
+        next.set(path, {
+          path,
+          rowCount: shard.rows.length,
+          sha: shard.sha ?? null,
+          updatedAt: null,
+          minKey: '',
+          maxKey: '',
+        });
+      }
+    }
+
     const targets = [];
     const removals = [];
 
-    for (const [path, entry] of entries) {
+    for (const [path, entry] of next) {
       const cached = state.shards.get(path);
 
       // SHA 相同说明本地内容与远端一致；即使本地有未提交改动也不需要重新下载，
       // 因为待提交分片是"整文件重写"，本地内容就是完整版本。
-      if (!cached || cached.sha !== entry.sha) {
+      if (cached && cached.sha === entry.sha) {
+        continue;
+      }
+      // 只重新下载"已经加载过"的分片；未加载的族留给 ensureFamily 按需加载
+      if (this.isLoadedPath(table, path)) {
         targets.push(path);
       }
     }
     for (const path of state.shards.keys()) {
-      if (!entries.has(path) && !this.pending.has(path)) {
+      if (!next.has(path) && !this.pending.has(path)) {
         removals.push(path);
       }
     }
 
-    if (targets.length === 0 && removals.length === 0) {
-      return;
-    }
-
-    for (let start = 0; start < targets.length; start += this.parallelism) {
-      const batch = targets.slice(start, start + this.parallelism);
-      const files = await Promise.all(
-        batch.map((path) => this.github.getFile(path)),
-      );
-
-      for (const [offset, path] of batch.entries()) {
-        const file = files[offset];
-
-        if (!file) {
-          continue;
-        }
-        const remoteRows = this.manager.parseShard(file.content);
-
-        // 本地有未提交改动时，远端内容只能"并进来"而不能直接覆盖
-        this.mergeShard(table, path, remoteRows, entries.get(path)?.sha ?? null, { preferRemote });
-      }
-    }
+    state.entries = next;
+    this.rebuildFamilies(table);
 
     for (const path of removals) {
+      this.unindexShard(table, path);
       state.shards.delete(path);
-      this.detachShard(table, path);
     }
 
-    this.rebuildIndexes(table);
+    if (targets.length > 0) {
+      await this.loadShards(table, targets, { preferRemote: false });
+    }
+
+    return state;
   }
 
   /**
-   * 把远端分片内容并入本地。
+   * 下载并合并一批分片。
    *
-   * 合并规则（默认本地优先，因为本地是本实例对外的权威视图）：
-   *   1. 本地已存在的 objectId → 保留本地版本（含本实例尚未提交的修改）；
-   *      计数类表（Counter）例外：数值列按"远端值 + 本地增量"合并
-   *   2. 本地已删除的 objectId → 尊重删除，不复活
-   *   3. 其余远端行 → 追加（这些是别的实例写入、本实例还没见过的数据）
-   *
-   * preferRemote 为真时改用"远端整体覆盖本地"：这是人工核对场景（rebuild），
-   * 语义是"以仓库里的文件为准"，此时本地可能正是过期的那个副本。
+   * @param {boolean} options.preferRemote true 时用远端内容整体覆盖本地（人工核对/恢复）
    */
-  mergeShard(table, path, remoteRows, sha, { preferRemote = false } = {}) {
+  async loadShards(table, paths, { preferRemote = false } = {}) {
     const state = this.tables[table];
-    let shard = state.shards.get(path);
+    // 调用方负责挑选路径：ensureFamily/ensureAll 只传未加载的，
+    // syncTable 则传"已加载但 SHA 变了"的——两者都要真的下载
+    const targets = paths;
 
-    if (!shard) {
-      shard = { rows: [], sha: null };
-      state.shards.set(path, shard);
-    }
+    for (let start = 0; start < targets.length; start += this.parallelism) {
+      const batch = targets.slice(start, start + this.parallelism);
+      const files = await Promise.all(batch.map((path) => this.github.getFile(path)));
 
-    if (preferRemote) {
-      shard.rows = remoteRows.map((row) => this.manager.normalizeRow(table, row));
-      shard.sha = sha;
-      this.pending.delete(path);
+      for (const [offset, path] of batch.entries()) {
+        const file = files[offset];
+        const remoteRows = file ? this.manager.parseShard(file.content) : [];
 
-      return shard;
-    }
-
-    const pending = this.pending.get(path);
-    const localById = new Map(shard.rows.map((row) => [row.objectId ?? '', row]));
-
-    for (const remote of remoteRows) {
-      const objectId = remote.objectId ?? '';
-
-      if (!objectId) {
-        continue;
+        this.mergeShard(table, path, remoteRows, state.entries.get(path)?.sha ?? null, { preferRemote });
       }
-      const local = localById.get(objectId);
+    }
+  }
 
-      if (local) {
-        // 同一行两边都有：默认保留本地版本（含本实例尚未提交的修改）；
-        // 计数类表改用"远端值 + 本地增量"，否则并发自增会静默丢一个 +1
-        if (DELTA_MERGE_TABLES.has(table)) {
-          this.applyRemoteDelta(local, remote, pending?.deltas?.get(objectId));
+  /** 该分片是否处在"已加载范围"内（已加载的族，或整表已加载）。 */
+  isLoadedPath(table, path) {
+    const state = this.tables[table];
+
+    if (state.allLoaded) {
+      return true;
+    }
+    const family = this.manager.familyOf(path);
+
+    return Boolean(family && state.loadedFamilies.has(family));
+  }
+
+  /** 加载指定的族（幂等：已加载过就直接返回）。 */
+  async ensureFamily(table, prefix) {
+    const state = this.tables[table];
+
+    if (state.allLoaded || state.loadedFamilies.has(prefix)) {
+      return;
+    }
+    const paths = [...(state.families.get(prefix) ?? EMPTY_SET)].filter((path) => !state.shards.has(path));
+
+    await this.loadShards(table, paths);
+    state.loadedFamilies.add(prefix);
+  }
+
+  /** 加载多族：常见于 url IN (…) 这类跨文章的查询。 */
+  async ensureFamilies(table, prefixes) {
+    const list = [...prefixes];
+
+    for (let start = 0; start < list.length; start += this.parallelism) {
+      await Promise.all(list.slice(start, start + this.parallelism).map((prefix) => this.ensureFamily(table, prefix)));
+    }
+  }
+
+  /** 加载整张表：无法把查询收敛到某个族时使用。 */
+  async ensureAll(table) {
+    const state = this.tables[table];
+
+    if (state.allLoaded) {
+      return;
+    }
+    await this.loadShards(table, [...state.entries.keys()].filter((path) => !state.shards.has(path)));
+    state.allLoaded = true;
+  }
+
+  /**
+   * 判断 where 能否收敛到若干分片族。
+   *
+   * 只有"分片 key 上的等值 / IN"能定位族；`_complex` 单独出现时，
+   * 只有它的每个分支都作用在分片 key 上才安全（外层条件作用于每个分支，
+   * 所以外层命中分片 key 就已经足够）。
+   *
+   * @returns {{complete: boolean, prefixes: Set<string>|null}}
+   *   complete=false 表示必须整表加载，否则结果可能不完整。
+   */
+  scopeFor(table, where) {
+    const keyField = this.manager.shardKeyField(table);
+    const prefixesOf = (condition) => {
+      if (Array.isArray(condition)) {
+        const operator = String(condition[0] ?? '').toUpperCase();
+
+        if (operator === 'IN' && Array.isArray(condition[1])) {
+          return new Set(condition[1].map((value) => this.manager.shardPrefix(table, toCell(value))));
         }
-        continue;
-      }
-      if (pending?.deleted.has(objectId)) {
-        continue;
-      }
-      const row = this.manager.normalizeRow(table, remote);
 
-      shard.rows.push(row);
-      localById.set(objectId, row);
+        return null;
+      }
+      if (condition !== null && typeof condition === 'object') {
+        return condition instanceof Date
+          ? new Set([this.manager.shardPrefix(table, toCell(condition))])
+          : null;
+      }
+
+      // undefined 表示"该列为空"，同样落在 key='' 的那个族里
+      return new Set([this.manager.shardPrefix(table, condition === undefined ? '' : toCell(condition))]);
+    };
+
+    if (where && typeof where === 'object') {
+      if (Object.prototype.hasOwnProperty.call(where, keyField)) {
+        const prefixes = prefixesOf(where[keyField]);
+
+        return prefixes ? { complete: true, prefixes } : { complete: false, prefixes: null };
+      }
+
+      const complex = where._complex;
+
+      if (complex && typeof complex === 'object') {
+        const union = new Set();
+        let complete = true;
+
+        for (const [field, condition] of Object.entries(complex)) {
+          if (field === '_logic') {
+            continue;
+          }
+          if (field !== keyField) {
+            complete = false;
+            break;
+          }
+          const prefixes = prefixesOf(condition);
+
+          if (!prefixes) {
+            complete = false;
+            break;
+          }
+          for (const prefix of prefixes) {
+            union.add(prefix);
+          }
+        }
+
+        if (complete && union.size > 0) {
+          return { complete: true, prefixes: union };
+        }
+      }
     }
 
-    shard.sha = sha;
+    return { complete: false, prefixes: null };
+  }
 
-    return shard;
+  /** 为一次查询准备加载范围。返回 null 表示整表已加载。 */
+  async ensureScope(table, where) {
+    const scope = this.scopeFor(table, where);
+
+    if (!scope.complete) {
+      await this.ensureAll(table);
+
+      return null;
+    }
+    await this.ensureFamilies(table, scope.prefixes);
+
+    return scope.prefixes;
   }
 
   /**
@@ -510,6 +637,8 @@ class CsvShardCache {
    * 为什么需要它：正常读路径只信任 manifest 记录的分片 SHA —— 这样才能用
    * 1 次请求判断"哪些分片变了"。如果有人直接改了仓库里的 CSV（这正是把数据
    * 放在仓库里的意义之一），manifest 就落后了，需要显式触发一次全量核对。
+   *
+   * 这是全量核对，因此会把整张表加载进来。
    *
    * @returns {{changed: number, tables: string[]}}
    */
@@ -523,12 +652,14 @@ class CsvShardCache {
 
       for (const [path, meta] of files) {
         if (this.manager.parseShardPath(path)?.table === table) {
-          entries.set(path, { path, sha: meta.sha });
+          entries.set(path, { path, sha: meta.sha, rowCount: 0, updatedAt: null, minKey: '', maxKey: '' });
         }
       }
 
       const before = new Map([...this.tables[table].shards].map(([path, shard]) => [path, shard.sha]));
-
+      // 以仓库为准整体重来：先清空内存，再标记"整表已加载"让 syncTable 全量下载
+      this.tables[table] = CsvShardCache.emptyTable();
+      this.tables[table].allLoaded = true;
       await this.syncTable(table, entries, { preferRemote: true });
 
       for (const [path, shard] of this.tables[table].shards) {
@@ -547,22 +678,23 @@ class CsvShardCache {
     return { changed, tables: [...changedTables] };
   }
 
-  /** 重建某张表的全部索引。刷新、回滚后调用，保证索引与数据一致。 */
+  // --------------------------------------------------------------------------
+  // 索引：分片级增量维护
+  // --------------------------------------------------------------------------
+
+  /** 重建某张表的全部索引。只在整表重写（compact / 回滚 / 冷重置）后调用。 */
   rebuildIndexes(table) {
     const state = this.tables[table];
     const indexedFields = this.manager.indexedFields(table);
 
     state.byId = new Map();
     state.byField = new Map();
-    state.families = new Map();
 
     for (const field of indexedFields) {
       state.byField.set(field, new Map());
     }
 
     for (const [shardPath, shard] of state.shards) {
-      this.attachShard(table, shardPath);
-
       for (const row of shard.rows) {
         const objectId = row.objectId ?? '';
 
@@ -573,6 +705,38 @@ class CsvShardCache {
         state.byId.set(objectId, { shardPath, row });
         this.indexRow(state, table, row);
       }
+    }
+  }
+
+  /** 把一整个分片的行登记进索引。 */
+  indexShard(table, path) {
+    const state = this.tables[table];
+    const shard = state.shards.get(path);
+
+    if (!shard) {
+      return;
+    }
+    for (const row of shard.rows) {
+      const objectId = row.objectId ?? '';
+
+      if (!objectId) {
+        continue;
+      }
+      state.byId.set(objectId, { shardPath: path, row });
+      this.indexRow(state, table, row);
+    }
+  }
+
+  /** 把一整个分片的行从索引里摘掉（内容被替换或分片被删除前调用）。 */
+  unindexShard(table, path) {
+    const state = this.tables[table];
+    const shard = state.shards.get(path);
+
+    if (!shard) {
+      return;
+    }
+    for (const row of shard.rows) {
+      this.unindexRow(state, table, row);
     }
   }
 
@@ -608,6 +772,102 @@ class CsvShardCache {
     state.byId.delete(objectId);
   }
 
+  /** 族索引是清单的投影：清单变了就重建（O(分片数)，只在刷新时发生）。 */
+  rebuildFamilies(table) {
+    const state = this.tables[table];
+    const families = new Map();
+
+    for (const path of state.entries.keys()) {
+      const family = this.manager.familyOf(path);
+
+      if (!family) {
+        continue;
+      }
+      if (!families.has(family)) {
+        families.set(family, new Set());
+      }
+      families.get(family).add(path);
+    }
+
+    state.families = families;
+  }
+
+  /**
+   * 把远端分片内容并入本地。
+   *
+   * 合并规则（默认本地优先，因为本地是本实例对外的权威视图）：
+   *   1. 本地已存在的 objectId → 保留本地版本（含本实例尚未提交的修改）；
+   *      计数类表（Counter）例外：数值列按"远端值 + 本地增量"合并
+   *   2. 本地已删除的 objectId → 尊重删除，不复活
+   *   3. 其余远端行 → 追加（这些是别的实例写入、本实例还没见过的数据）
+   *
+   * preferRemote 为真时改用"远端整体覆盖本地"：这是人工核对场景（rebuild），
+   * 语义是"以仓库里的文件为准"，此时本地可能正是过期的那个副本。
+   */
+  mergeShard(table, path, remoteRows, sha, { preferRemote = false } = {}) {
+    const state = this.tables[table];
+    let shard = state.shards.get(path);
+
+    if (!shard) {
+      shard = { rows: [], sha: null };
+      state.shards.set(path, shard);
+      if (!state.entries.has(path)) {
+        state.entries.set(path, { path, rowCount: 0, sha: null, updatedAt: null, minKey: '', maxKey: '' });
+      }
+      const family = this.manager.familyOf(path);
+
+      if (family) {
+        if (!state.families.has(family)) {
+          state.families.set(family, new Set());
+        }
+        state.families.get(family).add(path);
+      }
+    }
+
+    if (preferRemote) {
+      this.unindexShard(table, path);
+      shard.rows = remoteRows.map((row) => this.manager.normalizeRow(table, row));
+      shard.sha = sha;
+      this.pending.delete(path);
+      this.indexShard(table, path);
+
+      return shard;
+    }
+
+    const pending = this.pending.get(path);
+    const localById = new Map(shard.rows.map((row) => [row.objectId ?? '', row]));
+
+    for (const remote of remoteRows) {
+      const objectId = remote.objectId ?? '';
+
+      if (!objectId) {
+        continue;
+      }
+      const local = localById.get(objectId);
+
+      if (local) {
+        // 同一行两边都有：默认保留本地版本；计数类表改用"远端值 + 本地增量"
+        if (DELTA_MERGE_TABLES.has(table)) {
+          this.applyRemoteDelta(local, remote, pending?.deltas?.get(objectId));
+        }
+        continue;
+      }
+      if (pending?.deleted.has(objectId)) {
+        continue;
+      }
+      const row = this.manager.normalizeRow(table, remote);
+
+      shard.rows.push(row);
+      localById.set(objectId, row);
+      state.byId.set(objectId, { shardPath: path, row });
+      this.indexRow(state, table, row);
+    }
+
+    shard.sha = sha;
+
+    return shard;
+  }
+
   /**
    * 去重指纹：mail + url + 内容哈希。
    *
@@ -633,8 +893,38 @@ class CsvShardCache {
     }
   }
 
-  getRow(table, objectId) {
-    return this.tables[table].byId.get(objectId) ?? null;
+  /** 只遍历指定族里的已加载分片。 */
+  *iterateFamilyRows(table, prefixes) {
+    const state = this.tables[table];
+
+    for (const prefix of prefixes) {
+      for (const path of state.families.get(prefix) ?? EMPTY_SET) {
+        const shard = state.shards.get(path);
+
+        if (shard) {
+          yield* shard.rows;
+        }
+      }
+    }
+  }
+
+  /**
+   * 按主键取一行。
+   *
+   * Users 的分片 key 就是 objectId，因此可以直接定位到族；其它表的 objectId
+   * 与分片位置无关，只能整表加载后查（调用方应当尽量用带 url 的条件查询）。
+   */
+  async getRow(table, objectId) {
+    const state = this.tables[table];
+
+    if (this.manager.shardKeyField(table) === 'objectId') {
+      await this.ensureFamily(table, this.manager.shardPrefix(table, objectId ?? ''));
+
+      return state.byId.get(objectId) ?? null;
+    }
+    await this.ensureAll(table);
+
+    return state.byId.get(objectId) ?? null;
   }
 
   shardPathOf(table, objectId) {
@@ -711,15 +1001,23 @@ class CsvShardCache {
     return result;
   }
 
-  /** 返回命中 where 的行引用（不投影、不分页），供 update / delete 使用。 */
-  filterRows(table, where) {
+  /**
+   * 返回命中 where 的行引用（不投影、不分页），供 update / delete 使用。
+   *
+   * 会先把查询所需的分片族加载好：能收敛到族的查询只加载命中族，
+   * 收敛不了（后台列表、按 pid/rid 删除等）则整表加载，保证结果完整。
+   */
+  async filterRows(table, where) {
+    const prefixes = await this.ensureScope(table, where);
     const matcher = compileWhere(where);
     const candidates = this.narrowCandidates(table, where);
     const state = this.tables[table];
     const matched = [];
 
     if (candidates === null) {
-      for (const row of this.iterateRows(table)) {
+      const rows = prefixes === null ? this.iterateRows(table) : this.iterateFamilyRows(table, prefixes);
+
+      for (const row of rows) {
         if (matcher(row)) {
           matched.push(row);
         }
@@ -740,8 +1038,8 @@ class CsvShardCache {
   }
 
   /** 应用 where 与投影，并按 { order | desc, limit, offset, field } 返回结果。 */
-  select(table, where, { desc, field, limit, offset, order } = {}) {
-    const matched = this.filterRows(table, where);
+  async select(table, where, { desc, field, limit, offset, order } = {}) {
+    const matched = await this.filterRows(table, where);
     const normalizedOrder = normalizeOrder(order, desc, (orderField) =>
       orderField === 'id' ? 'objectId' : orderField,
     );
@@ -756,8 +1054,8 @@ class CsvShardCache {
     return sliced.map((row) => this.projectRow(row, field));
   }
 
-  count(table, where = {}, { group } = {}) {
-    const rows = this.filterRows(table, where);
+  async count(table, where = {}, { group } = {}) {
+    const rows = await this.filterRows(table, where);
 
     if (!group) {
       return rows.length;
@@ -815,13 +1113,21 @@ class CsvShardCache {
 
   /** 为分片族统计行数，供"填满优先 / 触发裂变"的写入路由使用。 */
   familyRowCounts(table, prefix) {
+    const state = this.tables[table];
     const counts = new Map();
 
-    for (const path of this.tables[table].families.get(prefix) ?? EMPTY_SET) {
-      const shard = this.tables[table].shards.get(path);
+    for (const path of state.families.get(prefix) ?? EMPTY_SET) {
+      const shard = state.shards.get(path);
 
       if (shard) {
         counts.set(path, shard.rows.length);
+        continue;
+      }
+      // 族内分片在 ensureFamily 之后应当都已加载；这里兜底用清单里的行数
+      const meta = state.entries.get(path);
+
+      if (meta) {
+        counts.set(path, meta.rowCount);
       }
     }
 
@@ -836,44 +1142,32 @@ class CsvShardCache {
     if (!shard) {
       shard = { rows: [], sha: null };
       state.shards.set(path, shard);
-      this.attachShard(table, path);
+      if (!state.entries.has(path)) {
+        state.entries.set(path, { path, rowCount: 0, sha: null, updatedAt: null, minKey: '', maxKey: '' });
+      }
+      const family = this.manager.familyOf(path);
+
+      if (family) {
+        if (!state.families.has(family)) {
+          state.families.set(family, new Set());
+        }
+        state.families.get(family).add(path);
+      }
     }
 
     return shard;
   }
 
-  /** 把分片登记进"族"索引：新增记录时据此 O(族内分片数) 找到落点，而不是扫全表。 */
-  attachShard(table, path) {
-    const family = this.manager.familyOf(path);
-
-    if (!family) {
-      return;
-    }
-    const families = this.tables[table].families;
-
-    if (!families.has(family)) {
-      families.set(family, new Set());
-    }
-    families.get(family).add(path);
-  }
-
-  detachShard(table, path) {
-    const family = this.manager.familyOf(path);
-
-    if (!family) {
-      return;
-    }
-    this.tables[table].families.get(family)?.delete(path);
-  }
-
   /** 新增一行，返回其落点分片路径。 */
-  applyAdd(table, row) {
+  async applyAdd(table, row) {
     const keyField = this.manager.shardKeyField(table);
-    const path = this.manager.resolveWriteShard(
-      table,
-      row[keyField] ?? '',
-      this.familyRowCounts(table, this.manager.shardPrefix(table, row[keyField] ?? '')),
-    );
+    const key = row[keyField] ?? '';
+    const prefix = this.manager.shardPrefix(table, key);
+
+    // 写入前必须加载目标族：落点选择要读族内各分片的行数
+    await this.ensureFamily(table, prefix);
+
+    const path = this.manager.resolveWriteShard(table, key, this.familyRowCounts(table, prefix));
     const shard = this.ensureShard(table, path);
 
     // 顺序很关键：先标脏（采集回滚基线），再动 shard.rows
@@ -1039,9 +1333,13 @@ class CsvShardCache {
    * 只做整族搬迁，不做跨族搬运：这样一次合并永远是"写一个文件 + 删若干文件"，
    * 落在一次 Git 提交里是原子的，也不影响其他族。
    *
+   * 需要整表加载：合并要读到族内全部行。
+   *
    * @returns {{merged: number, removed: number}} 合并的族数与删除的分片数
    */
-  compact(table) {
+  async compact(table) {
+    await this.ensureAll(table);
+
     const state = this.tables[table];
     let merged = 0;
     let removed = 0;
@@ -1066,7 +1364,9 @@ class CsvShardCache {
 
       // 先标脏（采基线、记录待提交），再整体替换内容
       this.pendingEntry(plan.target, table);
+      this.unindexShard(table, plan.target);
       target.rows = rows;
+      this.indexShard(table, plan.target);
 
       for (const path of plan.sources) {
         if (path === plan.target) {
@@ -1079,6 +1379,7 @@ class CsvShardCache {
           for (const row of shard.rows) {
             this.pendingEntry(path, table).deleted.add(row.objectId);
           }
+          this.unindexShard(table, path);
           shard.rows = [];
           this.pendingEntry(path, table);
           removed += 1;
@@ -1121,24 +1422,42 @@ class CsvShardCache {
    * 下一次刷新就会因为 SHA 对得上而跳过下载，那些别人的行就再也回不到内存里了。
    */
   restoreShards(baselines) {
-    const touched = new Set();
-
     for (const [path, baseline] of baselines) {
+      const state = this.tables[baseline.table];
+
       if (baseline.existed) {
         const shard = this.ensureShard(baseline.table, path);
 
+        this.unindexShard(baseline.table, path);
         shard.rows = baseline.rows.map((row) => ({ ...row }));
         shard.sha = baseline.sha;
+        const meta = state.entries.get(path);
+
+        if (meta) {
+          meta.sha = baseline.sha;
+          meta.rowCount = shard.rows.length;
+        } else {
+          state.entries.set(path, {
+            path,
+            rowCount: shard.rows.length,
+            sha: baseline.sha,
+            updatedAt: null,
+            minKey: '',
+            maxKey: '',
+          });
+        }
+        this.indexShard(baseline.table, path);
       } else {
         // 本次请求刚创建的分片：回滚后它不应该存在
-        this.tables[baseline.table].shards.delete(path);
-        this.detachShard(baseline.table, path);
-      }
-      touched.add(baseline.table);
-    }
+        this.unindexShard(baseline.table, path);
+        state.shards.delete(path);
+        state.entries.delete(path);
+        const family = this.manager.familyOf(path);
 
-    for (const table of touched) {
-      this.rebuildIndexes(table);
+        if (family) {
+          state.families.get(family)?.delete(path);
+        }
+      }
     }
   }
 
@@ -1162,10 +1481,17 @@ class CsvShardCache {
       if (!entry) {
         continue;
       }
-      const shard = this.tables[entry.table].shards.get(path);
+      const state = this.tables[entry.table];
+      const shard = state.shards.get(path);
+      const meta = state.entries.get(path);
 
       if (shard) {
         shard.sha = sha;
+      }
+      if (meta) {
+        meta.sha = sha;
+        meta.rowCount = shard ? shard.rows.length : meta.rowCount;
+        meta.updatedAt = new Date().toISOString();
       }
       touched.add(entry.table);
     }
@@ -1181,9 +1507,18 @@ class CsvShardCache {
       this.pending.delete(path);
       this.baselines.delete(path);
 
-      if (entry) {
-        this.tables[entry.table].shards.delete(path);
-        this.detachShard(entry.table, path);
+      if (!entry) {
+        continue;
+      }
+      const state = this.tables[entry.table];
+
+      this.unindexShard(entry.table, path);
+      state.shards.delete(path);
+      state.entries.delete(path);
+      const family = this.manager.familyOf(path);
+
+      if (family) {
+        state.families.get(family)?.delete(path);
       }
     }
   }

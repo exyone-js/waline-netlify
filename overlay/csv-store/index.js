@@ -234,7 +234,7 @@ async function isAdministrator(ctx, cache) {
   }
   await cache.ensureFresh();
 
-  return cache.getRow('Users', objectId)?.row?.type === 'administrator';
+  return (await cache.getRow('Users', objectId))?.row?.type === 'administrator';
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ async function handleAdminRequest(ctx, action) {
         const result = {};
 
         for (const table of TABLES) {
-          result[manager.tableDir(table)] = cache.compact(table);
+          result[manager.tableDir(table)] = await cache.compact(table);
         }
         await queue.flush();
 

@@ -88,11 +88,12 @@ class ShardWriteQueue {
    * 注意：这里"应用到内存"是立即完成的（写后读一致），落盘则推迟到 flush。
    * 所以 add() 之后紧接的 select() 一定能看到新数据，不会出现"提交成功但刷新消失"。
    */
-  enqueue(operation) {
+  async enqueue(operation) {
     const { type, table } = operation;
 
     switch (type) {
       case 'add':
+        // 新增要先加载目标分片族（落点选择要读族内各分片的行数），因此是异步的
         return this.cache.applyAdd(table, operation.row);
       case 'update':
         return this.cache.applyUpdate(table, operation.objectId, operation.patch);
@@ -315,19 +316,27 @@ class ShardWriteQueue {
   /**
    * 用当前内存状态重建某张表的 manifest 条目。
    *
-   * 已清空待删除的分片直接跳过；本轮待写入的分片用本地算出的 git blob SHA，
-   * 未变更的分片沿用缓存里已知的 SHA。
+   * 以缓存里的**权威清单**（entries）为准，而不是"已加载的分片"：按需加载下
+   * 未加载的分片也必须出现在 manifest 里，否则它们会从仓库的视角消失。
+   * 已清空待删除的分片直接跳过；本轮待写入的分片用本地算出的 git blob SHA；
+   * 已加载的分片按当前行重建行数/边界；未加载的分片沿用清单里的元数据。
    */
   manifestEntriesOf(table, shardShas, deletedPaths) {
+    const state = this.cache.tables[table];
     const entries = new Map();
 
-    for (const [path, shard] of this.cache.tables[table].shards) {
+    for (const [path, meta] of state.entries) {
       if (deletedPaths.has(path)) {
         continue;
       }
-      const sha = shardShas.get(path) ?? shard.sha ?? null;
+      const shard = state.shards.get(path);
+      const sha = shardShas.get(path) ?? shard?.sha ?? meta.sha ?? null;
 
-      entries.set(path, this.manager.manifestEntry(table, path, shard.rows, sha));
+      if (shard) {
+        entries.set(path, this.manager.manifestEntry(table, path, shard.rows, sha));
+      } else {
+        entries.set(path, { ...meta, sha });
+      }
     }
 
     return entries;

@@ -135,7 +135,7 @@ test('分片合并：行数回落到阈值内后压缩回基础分片', async (t
   // 只留 4 条（低于上限），随后压缩应把 3 个分片收回 1 个基础分片
   await comment.delete({ objectId: ['IN', ids.slice(0, 8)] });
 
-  const compacted = harness.store.cache.compact('Comment');
+  const compacted = await harness.store.cache.compact('Comment');
 
   await harness.store.queue.flush();
 
@@ -156,7 +156,9 @@ test('刷新是增量的：未变更的分片不会被重新下载', async (t) =
 
   const comment = harness.model('Comment');
 
+  // 两篇文章都写过 → 两个族都已加载，下面的"增量"才谈得上
   await comment.add(commentData({ url: '/a', comment: 'a' }));
+  await comment.add(commentData({ url: '/b', comment: 'b' }));
   await harness.store.queue.flush();
 
   // 刚提交完，本地算出的 blob SHA 应与远端一致 → 强制刷新应一个分片都不下载
@@ -166,10 +168,10 @@ test('刷新是增量的：未变更的分片不会被重新下载', async (t) =
   assert.equal(harness.mock.requestLog.length, 3, '三张表的 manifest 各一次请求');
   assert.equal(shardDownloadsOf(harness.mock, 'comments').length, 0, '没有分片需要重新下载');
 
-  // 另一个"实例"写入另一篇文章 → 只应下载它改动的那一个分片
+  // 另一个"实例"往 /b 追加一条 → 只应重新下载 /b 那一个分片
   const second = await harness.coldStart();
 
-  await second.model('Comment').add(commentData({ url: '/b', comment: 'b' }));
+  await second.model('Comment').add(commentData({ url: '/b', comment: 'b2' }));
   await second.store.queue.flush();
   second.store.queue.stop();
 
@@ -177,7 +179,38 @@ test('刷新是增量的：未变更的分片不会被重新下载', async (t) =
   await harness.store.cache.refresh({ force: true });
 
   assert.equal(shardDownloadsOf(harness.mock, 'comments').length, 1, '只应重新下载发生变化的那个分片');
-  assert.equal(await comment.count({}), 2);
+  assert.equal(await comment.count({}), 3);
+});
+
+test('按需加载：只查某一篇文章时不会下载其它文章的分片', async (t) => {
+  const harness = await createHarness();
+
+  t.after(() => harness.dispose());
+
+  const comment = harness.model('Comment');
+
+  // 5 篇文章各 3 条评论 → 5 个分片族
+  for (let index = 0; index < 5; index += 1) {
+    for (let inner = 0; inner < 3; inner += 1) {
+      await comment.add(commentData({ url: `/p${index}`, comment: `c-${index}-${inner}` }));
+    }
+  }
+  await harness.store.queue.flush();
+
+  // 冷启动：只查 /p2 这一篇
+  const { store, model } = await harness.coldStart();
+
+  harness.mock.requestLog.length = 0;
+
+  const rows = await model('Comment').select({ url: '/p2' }, { limit: 100 });
+
+  assert.equal(rows.length, 3, '按文章查询必须查全');
+  assert.equal(shardDownloadsOf(harness.mock, 'comments').length, 1, '只应下载命中族的那一个分片');
+  assert.equal([...store.cache.tables.Comment.shards.keys()].length <= 2, true, '未查询的分片不应进内存');
+
+  // 需要全局视图时（无 url 条件）才把整表读进来
+  assert.equal(await model('Comment').count({}), 15);
+  assert.equal(store.cache.tables.Comment.allLoaded, true);
 });
 
 test('手工改过仓库文件后，rebuild 能核对并同步（manifest 自动修正）', async (t) => {

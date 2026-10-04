@@ -191,7 +191,7 @@ async function runSize(total) {
 
   const sampleUrl = '/posts/0';
 
-  // ---- 新方案：冷启动（首次加载全部分片并建索引）----
+  // ---- 新方案：冷启动（按族按需加载：只加载命中文章的那个分片）----
   const store = createStore(config, { logger: silentLogger });
   const model = createModelFactory(store);
   const coldStart = await measure(mock, () => model('Comment').select({ url: sampleUrl }));
@@ -371,8 +371,10 @@ Waline 的列表页不是一次查询，而是 \`count × 2 + 根评论 + 子评
   sections.push(`
 ## 3. 冷启动首次查询（新方案）
 
-分片方案需要把分片加载进内存并建索引，这是它的"前置成本"。冷启动之后
-（同一实例内）所有查询都是纯内存操作，不再产生任何 GitHub 请求。
+分片方案按"分片族"按需加载：查某一篇文章时只下载它命中的那一两个分片，
+因此冷启动成本与**单篇文章**的体量相关，而不是与全站评论总量相关。
+冷启动之后（同一实例内）所有查询都是纯内存操作，不再产生任何 GitHub 请求；
+只有无法收敛到某个族的查询（后台列表、模糊搜索）才会把整表读进来。
 
 | 评论总数 | 分片数 | 首次查询耗时 | 首次查询 API 调用 | 首次下载量 |
 | ---: | ---: | ---: | ---: | ---: |
@@ -469,11 +471,10 @@ O(N × 文件体积)）；新方案的 ${BURST_SIZE} 次变更在同一个请求
    多出 head 校验、manifest 校验与 Git Data API 的 tree/commit/ref 步骤。
    这是用配额换"不丢数据"的取舍；对博客量级的评论频率（GitHub 限额 5000 次/小时）
    完全不构成约束。
-2. 冷启动要为加载分片付出一次性成本（见第 3 节）：
-   ${largest.total.toLocaleString('en-US')} 条评论 / ${largest.shardCount} 个分片约
-   ${(largest.coldStart.elapsed / 1000).toFixed(1)} s，之后由 TTL 缓存摊销
-   （单次下载量与旧方案读一次全量文件相当，但只需付一次而不是每次查询都付）。
-   分片数越多冷启动越慢，这也是存在 \`SHARD_HASH_LEN\` 这类调节开关的原因。
+2. 冷启动只需加载"命中族"的分片与三张表的 manifest（见第 3 节）：
+   ${largest.total.toLocaleString('en-US')} 条评论 / ${largest.shardCount} 个分片下，
+   首次查询约 ${largest.coldStart.calls} 次 API 调用、${human(largest.coldStart.bytes)}，
+   与总量基本无关。需要全局视图的查询（后台列表、模糊搜索）才会读全表。
 3. 数据不再集中在一个文件里，仓库中的文件数随文章数增长（本例
    ${largest.total.toLocaleString('en-US')} 条评论 = ${largest.shardCount} 个分片文件）。
    换来的是每次读写只碰一个文件、以及随时能用单个文件定位到某篇文章的数据。
