@@ -3,7 +3,7 @@
 /**
  * 改造前的基线实现：单文件 CSV 存储。
  *
- * 这是对 @waline/vercel/src/service/storage/github.js 数据访问方式的忠实复刻：
+ * 这是对 @waline/vercel/src/service/storage/github.js 数据访问方式的原版复刻：
  *   读：Contents API 下载整个 Comment.csv → 解析 → 在 JS 里逐行过滤 → 排序 → 分页
  *   写：Contents API 下载整个文件 → 改内存数组 → 整个文件 PUT 回去
  *
