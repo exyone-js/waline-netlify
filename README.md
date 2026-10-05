@@ -56,7 +56,7 @@
 
 ### 1.1 准备数据仓库
 
-新建一个 GitHub 仓库（例如 `your-name/waline-data`），其它全部保持默认：
+新建一个 GitHub 仓库（例如 `your-name/waline-comments`），其它全部保持默认：
 
 - **建议设为 Private**：评论 CSV 里含 `mail`、`ip`、`ua` 等字段，公开仓库等于公开这些信息。
 - **不要勾选 Add a README**（保持完全空白也可以）：本方案在空仓库上也能工作，
@@ -502,8 +502,37 @@ overlay/                        # ← 我们做的全部改造都在这一层里
 ├── csv-store/                  #   多 CSV 分片存储（适配器 + GitHub 客户端 + 快照 + 入口）
 ├── csv-store-tests/            #   内存版 GitHub API 与用例
 ├── benchmark/                  #   性能对比基准与生成的报告
-└── empty-stub/                 #   依赖桩（package.json 的 overrides 指向它）
+├── empty-stub/                 #   依赖桩的源码（npm run pack:stub 由它打出下面的 tarball）
+└── empty-stub-1.0.0.tgz        #   依赖桩的打包产物（package.json 的 overlay 指向它）
 ```
+
+### 依赖桩为什么必须打成 tarball 并提交
+
+`@mathjax/*`、`leancloud-*` 这类重依赖对本站没用（数学公式已关闭），但它们会被
+`@waline/vercel` 拉进依赖树，把 Netlify 的函数包顶到限额之外。我们用 `overlay`
+把它们替换成空实现——这里有个 npm 的坑：
+
+- **目录形式的桩**（`file:./overlay/empty-stub`）会被 npm 建成"链接"节点。一旦需要
+  重新解析依赖树（升级任何依赖、改版本范围），arborist 会在链接目标还没建立时去比较它，
+  直接抛 `Cannot read properties of null` —— 也就是说目录桩会让**依赖再也升不动**。
+- **tarball 形式的桩**（`file:./overlay/empty-stub-1.0.0.tgz`）被 npm 当作普通包安装，
+  不产生链接节点：升级、降级、`npm ci`、Netlify 构建全部正常，不需要任何额外开关。
+
+tarball 必须**提交进仓库**，因为它是安装时就要读到的文件：npm 在解析依赖树阶段就要
+按 `file:` 路径打开它，这发生在任何 `preinstall`/`postinstall` 脚本之前，所以没法
+"安装时现打"。它只有 500 多字节，且 lockfile 里记录了它的 integrity 哈希——
+换句话说它和 `package-lock.json` 是同一类东西：**可复现安装所需的输入**。
+
+改了桩代码或版本号之后，两步都要做（缺一不可）：
+
+```bash
+npm run pack:stub     # 重新打包 overlay/empty-stub → overlay/empty-stub-1.0.0.tgz
+npm install           # 让 lockfile 里的 integrity 指向新 tarball
+```
+
+> 想彻底不提交这个文件，唯一的替代是**把桩发布到 npm**、然后 `overlay` 写版本号
+> （例如 `"@mathjax/src": "npm:@your-scope/empty-stub@^1"`）。代价是多一个需要自己
+> 维护的已发布包；本仓库选择"提交 521 字节"。
 
 | 文件 | 职责 |
 |---|---|
@@ -517,10 +546,9 @@ overlay/                        # ← 我们做的全部改造都在这一层里
 | [overlay/csv-store/index.js](overlay/csv-store/index.js) | 入口：模型注入、中间件、运维接口、管理员鉴权 |
 | [overlay/csv-store-tests/](overlay/csv-store-tests/) | 内存版 GitHub API 与 55 个用例（真实 Waline 运行时端到端、并发冲突、分片裂变、快照恢复、内存预算） |
 | [overlay/benchmark/](overlay/benchmark/) | 性能对比基准与报告生成 |
-| [overlay/empty-stub/](overlay/empty-stub/) | 重依赖的空实现桩（由 `package.json` 的 `overrides` 指向） |
+| [overlay/empty-stub/](overlay/empty-stub/) | 重依赖的空实现桩源码；打包产物 `overlay/empty-stub-1.0.0.tgz` 由 `package.json` 的 `overlay` 指向 |
 
-`overlay/empty-stub` 是给 `@mathjax/*`、`leancloud-*` 等重依赖用的空实现，
-作用是让 Netlify 的依赖体积保持在限额内（外置包约 94MB，低于 250MB 限制）；
+依赖桩让外置包总体积保持在约 93MB，低于 Netlify 的 250MB 函数包限额；
 它与 csv-store 无关，只是同样属于"我们对上游的改写"。
 
 ### 加载范围：按分片族按需加载
@@ -563,11 +591,17 @@ git merge upstream/master --no-ff
 ```
 
 `package-lock.json` 几乎必然冲突：**保留本地版本**（`git checkout HEAD -- package-lock.json`）。
-本仓库的 lockfile 是 v3 且已按 `overrides` 裁剪过，混进上游的 v2 结构会让 Netlify 依赖体积失控。
+本仓库的 lockfile 是 v3 且已按 `overlay` 裁剪过，混进上游的 v2 结构会让 Netlify 依赖体积失控。
 
-`@waline/vercel` 目前锁在 1.41.6。要跟进上游新版本时注意：升级会牵动
+`@waline/vercel` 目前在 1.43.4。要跟进上游新版本时注意：升级会牵动
 `netlify/functions/comment.js` 的 `model` / `plugins` 注入契约与数据表列，
 升完必须跑完 `npm test`（含真实 Waline 运行时端到端用例）再上线。
+
+> **注意 `overlay` 不能改名**：`package.json` 里的 `overlay` 是 **npm 自己的字段**
+> （[官方文档](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#overlay)），
+> 不是本仓库的命名约定。改成别的键名（例如 `overlay`）会被 npm 当成未知字段忽略，
+> 于是 `@mathjax/*`、`leancloud-*` 会被真实安装，函数包体积直接冲破 Netlify 的限额。
+> 仓库里与 `overlay` 有关的是**目录名**（`overlay/`），两者不是一回事。
 
 ---
 

@@ -64,6 +64,9 @@ typings/
 
 # Output of 'npm pack'
 *.tgz
+# 例外：依赖桩的打包产物是安装时必需的文件（package.json 的 overrides 指向它），
+# 但它不是"打包垃圾"，必须提交。改桩后请用 npm run pack:stub 重新生成。
+!overlay/empty-stub-*.tgz
 
 # Yarn Integrity file
 .yarn-integrity

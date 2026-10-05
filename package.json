@@ -15,21 +15,22 @@
   "homepage": "https://github.com/walinejs/netlify-starter#readme",
   "scripts": {
     "test": "node --test \"overlay/csv-store-tests/*.spec.js\"",
-    "benchmark": "node overlay/benchmark/run.js"
+    "benchmark": "node overlay/benchmark/run.js",
+    "pack:stub": "npm pack ./overlay/empty-stub --pack-destination overlay"
   },
   "dependencies": {
-    "@waline/vercel": "^1.41.6",
+    "@waline/vercel": "^1.43.4",
     "csv-parse": "^6.1.0",
     "csv-stringify": "^6.6.0",
     "serverless-http": "^4.0.0"
   },
   "overrides": {
-    "@mathjax/src": "file:./overlay/empty-stub",
-    "@mathjax/mathjax-newcm-font": "file:./overlay/empty-stub",
-    "@mathjax/mathjax-tex-font": "file:./overlay/empty-stub",
-    "speech-rule-engine": "file:./overlay/empty-stub",
-    "leancloud-storage": "file:./overlay/empty-stub",
-    "leancloud-realtime": "file:./overlay/empty-stub",
+    "@mathjax/src": "file:./overlay/empty-stub-1.0.0.tgz",
+    "@mathjax/mathjax-newcm-font": "file:./overlay/empty-stub-1.0.0.tgz",
+    "@mathjax/mathjax-tex-font": "file:./overlay/empty-stub-1.0.0.tgz",
+    "speech-rule-engine": "file:./overlay/empty-stub-1.0.0.tgz",
+    "leancloud-storage": "file:./overlay/empty-stub-1.0.0.tgz",
+    "leancloud-realtime": "file:./overlay/empty-stub-1.0.0.tgz",
     "jsdom": "26.1.0"
   }
 }
