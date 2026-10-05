@@ -415,7 +415,7 @@ for (const table of TABLES) {
 
 ```bash
 npm install
-npm test          # 55 个用例：单元 + 集成 + 真实 Waline 运行时端到端
+npm test          # 56 个用例：单元 + 集成 + 真实 Waline 运行时端到端
                   #            + 并发/限流可靠性 + 内存预算
 npm run benchmark # 生成 overlay/benchmark/REPORT.md
 ```
@@ -423,6 +423,16 @@ npm run benchmark # 生成 overlay/benchmark/REPORT.md
 测试不需要任何真实凭据：`overlay/csv-store-tests/mock-github.js` 是一个会讲 HTTP 的
 内存版 GitHub（真的维护 blob/tree/commit/ref 四层对象，真的会拒绝非快进更新），
 所以"并发冲突""重试""回滚"这些行为测到的就是线上行为。
+
+**本地必须也验一遍生产运行时**：Lambda 的 Node 24 **没有开启 `require(esm)`**，而本地
+Node 默认开着，所以"某个依赖变成纯 ESM 却被同步 require"这类问题本地跑得好好的、上线才炸
+（1.43.4 的 `@mdit/plugin-emoji` 就是这么踩的）。`npm test` 里已经有一个守卫用例会开
+子进程用 `--no-experimental-require-module` 加载函数入口，想手工确认也可以直接跑：
+
+```bash
+# 模拟生产运行时，确认函数入口能被加载（这是把 1.43.4 跑挂的那个坑）
+node --no-experimental-require-module -e "require('./netlify/functions/comment.js')"
+```
 
 想拿真实仓库跑，可以另外建一个测试仓库、把 `GITHUB_TOKEN` / `GITHUB_REPO` 写进 `.env` 后
 `netlify dev`（需要 Netlify CLI）。**不要直接拿线上数据仓库做实验**，先 `POST /csv-store/snapshot`。
@@ -433,6 +443,7 @@ npm run benchmark # 生成 overlay/benchmark/REPORT.md
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
+| 冷启动报 `ERR_REQUIRE_ESM`（函数返回 502，日志里有 `Init Error`） | 某个依赖只有 ESM 构建，却被 waline 在模块加载期同步 `require` 了；Lambda 的 Node 24 没开 `require(esm)` | 本仓库已用 `overlay/plugin-emoji-cjs` 垫片解决 1.43.4 的这类问题；升级 waline 后再遇到，用 `node --no-experimental-require-module -e "require('./netlify/functions/comment.js')"` 定位到具体包，再按同样方式加垫片 |
 | 评论提交返回 500 `评论存储提交失败` | 提交 GitHub 失败且重试耗尽；内存变更已回滚，**数据没有丢一半** | 检查 `GITHUB_TOKEN` 权限/有效期与 GitHub 状态 |
 | 日志出现 `无法访问 GitHub 仓库` | `GITHUB_REPO` 不是 `owner/repo`，或 token 未授权该仓库 | 修正环境变量后重新部署 |
 | `/ui/register` 打不开或 404 | 路径不对（Netlify 下没有 `/api` 前缀）或函数没起来 | 用 `/.netlify/functions/comment/ui/register`；看 Function 日志 |
@@ -502,37 +513,45 @@ overlay/                        # ← 我们做的全部改造都在这一层里
 ├── csv-store/                  #   多 CSV 分片存储（适配器 + GitHub 客户端 + 快照 + 入口）
 ├── csv-store-tests/            #   内存版 GitHub API 与用例
 ├── benchmark/                  #   性能对比基准与生成的报告
-├── empty-stub/                 #   依赖桩的源码（npm run pack:stub 由它打出下面的 tarball）
-└── empty-stub-1.0.0.tgz        #   依赖桩的打包产物（package.json 的 overlay 指向它）
+├── empty-stub/                 #   空实现桩的源码（npm run pack:stubs 打出下面的 tarball）
+│   └── …                       #   替换 @mathjax/*、leancloud-* 等重依赖
+├── plugin-emoji-cjs/           #   emoji 垫片的源码（把 ESM-only 的包以 CJS 形式提供）
+├── empty-stub-1.0.0.tgz        #   ↑ 两个本地包的打包产物（package.json 的 overrides 指向它们）
+└── plugin-emoji-cjs-1.0.0.tgz
 ```
 
-### 依赖桩为什么必须打成 tarball 并提交
+### 两个本地包：为什么必须打成 tarball 并提交
 
-`@mathjax/*`、`leancloud-*` 这类重依赖对本站没用（数学公式已关闭），但它们会被
-`@waline/vercel` 拉进依赖树，把 Netlify 的函数包顶到限额之外。我们用 `overlay`
-把它们替换成空实现——这里有个 npm 的坑：
+`package.json` 的 `overrides` 会把两个第三方包替换成 `overlay/` 下的本地包：
 
-- **目录形式的桩**（`file:./overlay/empty-stub`）会被 npm 建成"链接"节点。一旦需要
-  重新解析依赖树（升级任何依赖、改版本范围），arborist 会在链接目标还没建立时去比较它，
-  直接抛 `Cannot read properties of null` —— 也就是说目录桩会让**依赖再也升不动**。
-- **tarball 形式的桩**（`file:./overlay/empty-stub-1.0.0.tgz`）被 npm 当作普通包安装，
-  不产生链接节点：升级、降级、`npm ci`、Netlify 构建全部正常，不需要任何额外开关。
+| 被替换的包 | 换成 | 原因 |
+|---|---|---|
+| `@mathjax/*`、`leancloud-*`、`speech-rule-engine` | `empty-stub` | 这些重依赖本站用不到（数学公式已关闭），留着会把 Netlify 的函数包顶到限额之外 |
+| `@mdit/plugin-emoji` | `plugin-emoji-cjs` | 它**只有 ESM 构建**，而 waline 在模块加载期同步 `require` 它，禁用 `require(esm)` 的运行时（Lambda 的 Node 24）会直接 `ERR_REQUIRE_ESM` |
 
-tarball 必须**提交进仓库**，因为它是安装时就要读到的文件：npm 在解析依赖树阶段就要
-按 `file:` 路径打开它，这发生在任何 `preinstall`/`postinstall` 脚本之前，所以没法
-"安装时现打"。它只有 500 多字节，且 lockfile 里记录了它的 integrity 哈希——
-换句话说它和 `package-lock.json` 是同一类东西：**可复现安装所需的输入**。
+**为什么用 tarball 而不是目录**：目录形式的桩（`file:./overlay/empty-stub`）会被 npm
+建成"链接"节点；一旦需要重新解析依赖树（升级任何依赖、改版本范围），arborist 会在链接
+目标还没建立时去比较它，直接抛 `Cannot read properties of null` —— 也就是说目录桩会让
+**依赖再也升不动**。tarball 形式的桩被 npm 当作普通包安装，不产生链接节点：升级、降级、
+`npm ci`、Netlify 构建全部正常，不需要任何额外开关。
 
-改了桩代码或版本号之后，两步都要做（缺一不可）：
+**为什么必须提交这两个 tarball**：npm 在解析依赖树阶段就要按 `file:` 路径打开它们，
+这发生在任何 `preinstall`/`postinstall` 脚本之前，所以没法"安装时现打"。它们合起来只有
+1.7KB，且 lockfile 里记录了各自的 integrity 哈希——换句话说它们和 `package-lock.json`
+是同一类东西：**可复现安装所需的输入**。
+
+改了本地包的内容或版本号之后，按这个顺序做（否则 npm 会拿旧 lockfile 里的条目去替换，
+报出 `ENOENT ... overlay/xxx.tgz` 或 tarball 损坏之类的怪错）：
 
 ```bash
-npm run pack:stub     # 重新打包 overlay/empty-stub → overlay/empty-stub-1.0.0.tgz
-npm install           # 让 lockfile 里的 integrity 指向新 tarball
+npm run pack:stubs      # 重新打包两个本地包 → overlay/*.tgz
+rm package-lock.json    # 让 npm 从零解析（overrides 变动时必须）
+npm install             # 重建 node_modules 与 lockfile
 ```
 
-> 想彻底不提交这个文件，唯一的替代是**把桩发布到 npm**、然后 `overlay` 写版本号
-> （例如 `"@mathjax/src": "npm:@your-scope/empty-stub@^1"`）。代价是多一个需要自己
-> 维护的已发布包；本仓库选择"提交 521 字节"。
+> 想彻底不提交 tarball，唯一的替代是**把这些本地包发布到 npm**、然后 `overrides` 写版本号
+> （例如 `"@mdit/plugin-emoji": "npm:@your-scope/plugin-emoji-cjs@^1"`）。代价是多一个
+> 需要自己维护的已发布包；本仓库选择"提交 1.7KB"。
 
 | 文件 | 职责 |
 |---|---|
@@ -544,9 +563,10 @@ npm install           # 让 lockfile 里的 integrity 指向新 tarball
 | [overlay/csv-store/csv-model.js](overlay/csv-store/csv-model.js) | Waline `CustomModel` 适配器实现 |
 | [overlay/csv-store/snapshot.js](overlay/csv-store/snapshot.js) | 快照创建、保留策略、恢复、仓库重置 |
 | [overlay/csv-store/index.js](overlay/csv-store/index.js) | 入口：模型注入、中间件、运维接口、管理员鉴权 |
-| [overlay/csv-store-tests/](overlay/csv-store-tests/) | 内存版 GitHub API 与 55 个用例（真实 Waline 运行时端到端、并发冲突、分片裂变、快照恢复、内存预算） |
+| [overlay/csv-store-tests/](overlay/csv-store-tests/) | 内存版 GitHub API 与 56 个用例（真实 Waline 运行时端到端、并发冲突、分片裂变、快照恢复、内存预算、生产运行时加载守卫） |
 | [overlay/benchmark/](overlay/benchmark/) | 性能对比基准与报告生成 |
-| [overlay/empty-stub/](overlay/empty-stub/) | 重依赖的空实现桩源码；打包产物 `overlay/empty-stub-1.0.0.tgz` 由 `package.json` 的 `overlay` 指向 |
+| [overlay/empty-stub/](overlay/empty-stub/) | 重依赖的空实现桩源码（打包产物由 `package.json` 的 `overrides` 指向） |
+| [overlay/plugin-emoji-cjs/](overlay/plugin-emoji-cjs/) | emoji 垫片源码：把只有 ESM 构建的 `@mdit/plugin-emoji` 以 CJS 形式提供给 waline 的同步 require |
 
 依赖桩让外置包总体积保持在约 93MB，低于 Netlify 的 250MB 函数包限额；
 它与 csv-store 无关，只是同样属于"我们对上游的改写"。
@@ -591,17 +611,17 @@ git merge upstream/master --no-ff
 ```
 
 `package-lock.json` 几乎必然冲突：**保留本地版本**（`git checkout HEAD -- package-lock.json`）。
-本仓库的 lockfile 是 v3 且已按 `overlay` 裁剪过，混进上游的 v2 结构会让 Netlify 依赖体积失控。
+本仓库的 lockfile 是 v3 且已按 `overrides` 裁剪过，混进上游的 v2 结构会让 Netlify 依赖体积失控。
 
 `@waline/vercel` 目前在 1.43.4。要跟进上游新版本时注意：升级会牵动
 `netlify/functions/comment.js` 的 `model` / `plugins` 注入契约与数据表列，
 升完必须跑完 `npm test`（含真实 Waline 运行时端到端用例）再上线。
 
-> **注意 `overlay` 不能改名**：`package.json` 里的 `overlay` 是 **npm 自己的字段**
-> （[官方文档](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#overlay)），
-> 不是本仓库的命名约定。改成别的键名（例如 `overlay`）会被 npm 当成未知字段忽略，
+> **注意 `overrides` 不能改名**：`package.json` 里的 `overrides` 是 **npm 自己的字段**
+> （[官方文档](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#overrides)），
+> 不是本仓库的命名约定。改成别的键名会被 npm 当成未知字段静默忽略，
 > 于是 `@mathjax/*`、`leancloud-*` 会被真实安装，函数包体积直接冲破 Netlify 的限额。
-> 仓库里与 `overlay` 有关的是**目录名**（`overlay/`），两者不是一回事。
+> 仓库里叫 `overlay/` 的是**目录**（放我们自己的改造），两者不是一回事。
 
 ---
 
